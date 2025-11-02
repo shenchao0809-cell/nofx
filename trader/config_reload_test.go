@@ -15,6 +15,7 @@ func TestReloadAIModelConfig(t *testing.T) {
 		CustomModelName: "deepseek", // 初始错误的配置
 		CustomAPIKey:    "test-key-123",
 		CustomAPIURL:    "https://api.deepseek.com/v1",
+		InitialBalance:  1000.0,
 	}
 
 	trader, err := NewAutoTrader(initialConfig)
@@ -60,6 +61,7 @@ func TestReloadAIModelConfig_EmptyModelName(t *testing.T) {
 		Name:            "Test Trader",
 		AIModel:         "deepseek",
 		CustomModelName: "deepseek-chat",
+		InitialBalance:  1000.0,
 	}
 
 	trader, err := NewAutoTrader(initialConfig)
@@ -96,6 +98,7 @@ func TestReloadAIModelConfig_QwenModel(t *testing.T) {
 		AIModel:         "qwen",
 		CustomModelName: "qwen-max",
 		QwenKey:         "old-qwen-key",
+		InitialBalance:  1000.0,
 	}
 
 	trader, err := NewAutoTrader(initialConfig)
