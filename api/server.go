@@ -541,7 +541,8 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 
 		exchanges, exchangeErr := s.database.GetExchanges(userID)
 		if exchangeErr != nil {
-			log.Printf("⚠️ 获取交易所配置失败，将使用用户输入的初始资金: %v", exchangeErr)
+			log.Printf("⚠️ 获取交易所配置失败，使用默认值 1000 USDT: %v", exchangeErr)
+			actualBalance = 1000.0
 		} else {
 			// 查找匹配的交易所配置
 			var exchangeCfg *config.ExchangeConfig
@@ -553,9 +554,11 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 			}
 
 			if exchangeCfg == nil {
-				log.Printf("⚠️ 未找到交易所 %s 的配置，将使用用户输入的初始资金", req.ExchangeID)
+				log.Printf("⚠️ 未找到交易所 %s 的配置，使用默认值 1000 USDT", req.ExchangeID)
+				actualBalance = 1000.0
 			} else if !exchangeCfg.Enabled {
-				log.Printf("⚠️ 交易所 %s 未启用，将使用用户输入的初始资金", req.ExchangeID)
+				log.Printf("⚠️ 交易所 %s 未启用，使用默认值 1000 USDT", req.ExchangeID)
+				actualBalance = 1000.0
 			} else {
 				// 根据交易所类型创建临时 trader 查询余额
 				var tempTrader trader.Trader
@@ -577,16 +580,19 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 						exchangeCfg.AsterPrivateKey,
 					)
 				default:
-					log.Printf("⚠️ 不支持的交易所类型: %s，将使用用户输入的初始资金", req.ExchangeID)
+					log.Printf("⚠️ 不支持的交易所类型: %s，使用默认值 1000 USDT", req.ExchangeID)
+					actualBalance = 1000.0
 				}
 
 				if createErr != nil {
-					log.Printf("⚠️ 创建临时 trader 失败，将使用用户输入的初始资金: %v", createErr)
+					log.Printf("⚠️ 创建临时 trader 失败，使用默认值 1000 USDT: %v", createErr)
+					actualBalance = 1000.0
 				} else if tempTrader != nil {
 					// 查询实际余额
 					balanceInfo, balanceErr := tempTrader.GetBalance()
 					if balanceErr != nil {
-						log.Printf("⚠️ 查询交易所余额失败，将使用用户输入的初始资金: %v", balanceErr)
+						log.Printf("⚠️ 查询交易所余额失败，使用默认值 1000 USDT: %v", balanceErr)
+						actualBalance = 1000.0
 					} else {
 						// ✅ 使用总资产（total equity）而不是可用余额
 						// 总资产 = 钱包余额 + 未实现盈亏，这样才能正确计算总盈亏
@@ -608,7 +614,8 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 							log.Printf("✓ 查询到交易所总资产余额: %.2f USDT (钱包: %.2f + 未实现: %.2f)",
 								actualBalance, totalWalletBalance, totalUnrealizedProfit)
 						} else {
-							log.Printf("⚠️ 无法从余额信息中提取总资产余额，将使用用户输入的初始资金")
+							log.Printf("⚠️ 无法从余额信息中提取总资产余额，使用默认值 1000 USDT")
+							actualBalance = 1000.0
 						}
 					}
 				}
