@@ -63,8 +63,10 @@ export function TwoStageKeyModal({
   const stage1Ref = useRef<HTMLInputElement>(null)
   const stage2Ref = useRef<HTMLInputElement>(null)
 
-  const expectedPart1Length = Math.ceil(expectedLength / 2)
-  const expectedPart2Length = expectedLength - expectedPart1Length
+  // 優化：改用 58 + 6 分段（前面大部分 + 最後6位）
+  // 優勢：第二階段只需輸入6個字符，更容易數清楚
+  const expectedPart1Length = expectedLength - 6  // 64 - 6 = 58
+  const expectedPart2Length = 6  // 最後6位
 
   useEffect(() => {
     if (isOpen && stage === 1 && stage1Ref.current) {
