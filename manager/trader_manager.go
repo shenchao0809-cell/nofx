@@ -435,8 +435,9 @@ func (tm *TraderManager) RemoveTrader(traderID string) error {
 		return fmt.Errorf("trader ID '%s' 不存在", traderID)
 	}
 
-	// 确保交易员已停止
-	status := trader.GetStatus()
+	// 确保交易员已停止（檢查 nil 避免測試時 panic）
+	if trader != nil {
+		status := trader.GetStatus()
 	if status != nil {
 		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
 			log.Printf("⚠️ 交易员 %s 仍在运行，正在停止...", traderID)
@@ -451,6 +452,7 @@ func (tm *TraderManager) RemoveTrader(traderID string) error {
 				}
 			}
 		}
+	}
 	}
 
 	// 从map中删除
@@ -1113,16 +1115,4 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 	tm.traders[traderCfg.ID] = at
 	log.Printf("✓ Trader '%s' (%s + %s) 已为用户加载到内存", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ExchangeID)
 	return nil
-}
-
-// RemoveTrader 从内存中移除指定的trader（不影响数据库）
-// 用于更新trader配置时强制重新加载
-func (tm *TraderManager) RemoveTrader(traderID string) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	if _, exists := tm.traders[traderID]; exists {
-		delete(tm.traders, traderID)
-		log.Printf("✓ Trader %s 已从内存中移除", traderID)
-	}
 }

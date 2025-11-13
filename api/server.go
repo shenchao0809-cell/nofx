@@ -961,7 +961,7 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	}
 
 	// 🔄 从内存中移除旧的trader实例，以便重新加载最新配置
-	s.traderManager.RemoveTrader(traderID)
+	_ = s.traderManager.RemoveTrader(traderID) // 忽略錯誤，trader可能不在內存中
 
 	// 重新加载交易员到内存
 	err = s.traderManager.LoadTraderByID(s.database, userID, traderID)
