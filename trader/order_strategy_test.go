@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
 )
@@ -14,6 +15,91 @@ import (
 func TestOrderStrategy_MarketOnly(t *testing.T) {
 	// Mock server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Log all requests for debugging
+		t.Logf("Mock received: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+
+		// Mock initialization endpoints
+		if r.URL.Path == "/fapi/v1/time" {
+			// Server time endpoint
+			response := map[string]interface{}{
+				"serverTime": time.Now().UnixMilli(),
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/positionSide/dual" {
+			// Position mode endpoint - return success
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/leverage" {
+			// Leverage setting endpoint
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"leverage": 10,
+				"symbol":   "BTCUSDT",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE" {
+			// Cancel all open orders
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/positionRisk" {
+			// Return empty positions
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/exchangeInfo" {
+			// Return minimal exchange info
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"symbols": []map[string]interface{}{
+					{
+						"symbol": "BTCUSDT",
+						"filters": []map[string]interface{}{
+							{
+								"filterType": "LOT_SIZE",
+								"stepSize":   "0.001",
+							},
+							{
+								"filterType": "PRICE_FILTER",
+								"tickSize":   "0.01",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/ticker/price" {
+			// Price endpoint (v2!)
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"symbol": "BTCUSDT",
+					"price":  "50000.0",
+				},
+			})
+			return
+		}
+
 		if r.URL.Path == "/fapi/v1/order" {
 			// 市價單應該直接成交
 			response := &futures.CreateOrderResponse{
@@ -30,9 +116,13 @@ func TestOrderStrategy_MarketOnly(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	trader := NewFuturesTrader("test_key", "test_secret", "test_user", "market_only", -0.03, 60)
-	trader.client.BaseURL = mockServer.URL
-	trader.client.HTTPClient = mockServer.Client()
+	// Create a client configured to use the mock server
+	client := futures.NewClient("test_key", "test_secret")
+	client.BaseURL = mockServer.URL
+	client.HTTPClient = mockServer.Client()
+
+	// Create trader with the mocked client
+	trader := newFuturesTraderWithClient(client, "market_only", -0.03, 60)
 
 	// 測試開多倉
 	result, err := trader.OpenLong("BTCUSDT", 100.0, 10)
@@ -42,12 +132,13 @@ func TestOrderStrategy_MarketOnly(t *testing.T) {
 
 	orderID, ok := result["orderId"].(int64)
 	if !ok || orderID != 12345 {
-		t.Errorf("預期 OrderID=12345, 實際 %v", result["orderId"])
+		t.Fatalf("預期 OrderID=12345, 實際 %v (type: %T)", result["orderId"], result["orderId"])
 	}
 
-	status, ok := result["status"].(string)
-	if !ok || status != "FILLED" {
-		t.Errorf("預期 Status=FILLED, 實際 %v", result["status"])
+	// Status might be OrderStatusType enum or string, so check the value not the type
+	statusStr := fmt.Sprintf("%v", result["status"])
+	if statusStr != "FILLED" {
+		t.Fatalf("預期 Status=FILLED, 實際 %v (type: %T)", result["status"], result["status"])
 	}
 
 	t.Logf("✅ market_only 策略測試通過")
@@ -57,13 +148,79 @@ func TestOrderStrategy_MarketOnly(t *testing.T) {
 func TestOrderStrategy_LimitOnly(t *testing.T) {
 	// Mock server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/fapi/v1/ticker/price" {
-			// 返回當前價格
+		// Mock initialization endpoints
+		if r.URL.Path == "/fapi/v1/time" {
 			response := map[string]interface{}{
-				"symbol": "BTCUSDT",
-				"price":  "50000.0",
+				"serverTime": time.Now().UnixMilli(),
 			}
 			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/positionSide/dual" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/leverage" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"leverage": 10,
+				"symbol":   "BTCUSDT",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/positionRisk" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/exchangeInfo" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"symbols": []map[string]interface{}{
+					{
+						"symbol": "BTCUSDT",
+						"filters": []map[string]interface{}{
+							{
+								"filterType": "LOT_SIZE",
+								"stepSize":   "0.001",
+							},
+							{
+								"filterType": "PRICE_FILTER",
+								"tickSize":   "0.01",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/ticker/price" || r.URL.Path == "/fapi/v1/ticker/price" {
+			// Price endpoint (support both v1 and v2)
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"symbol": "BTCUSDT",
+					"price":  "50000.0",
+				},
+			})
 			return
 		}
 
@@ -85,9 +242,13 @@ func TestOrderStrategy_LimitOnly(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	trader := NewFuturesTrader("test_key", "test_secret", "test_user", "limit_only", -0.03, 60)
-	trader.client.BaseURL = mockServer.URL
-	trader.client.HTTPClient = mockServer.Client()
+	// Create a client configured to use the mock server
+	client := futures.NewClient("test_key", "test_secret")
+	client.BaseURL = mockServer.URL
+	client.HTTPClient = mockServer.Client()
+
+	// Create trader with the mocked client
+	trader := newFuturesTraderWithClient(client, "limit_only", -0.03, 60)
 
 	// 測試開多倉
 	result, err := trader.OpenLong("BTCUSDT", 100.0, 10)
@@ -97,12 +258,13 @@ func TestOrderStrategy_LimitOnly(t *testing.T) {
 
 	orderID, ok := result["orderId"].(int64)
 	if !ok || orderID != 12346 {
-		t.Errorf("預期 OrderID=12346, 實際 %v", result["orderId"])
+		t.Fatalf("預期 OrderID=12346, 實際 %v (type: %T)", result["orderId"], result["orderId"])
 	}
 
-	status, ok := result["status"].(string)
-	if !ok || status != "NEW" {
-		t.Errorf("預期 Status=NEW (限價單未成交), 實際 %v", result["status"])
+	// Status might be OrderStatusType enum or string, so check the value not the type
+	statusStr := fmt.Sprintf("%v", result["status"])
+	if statusStr != "NEW" {
+		t.Fatalf("預期 Status=NEW (限價單未成交), 實際 %v (type: %T)", result["status"], result["status"])
 	}
 
 	t.Logf("✅ limit_only 策略測試通過 - 限價單創建成功，不會自動轉換為市價單")
@@ -112,12 +274,78 @@ func TestOrderStrategy_LimitOnly(t *testing.T) {
 func TestOrderStrategy_ConservativeHybrid_Success(t *testing.T) {
 	// Mock server - 模擬限價單立即成交的場景
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/fapi/v1/ticker/price" {
+		// Mock initialization endpoints
+		if r.URL.Path == "/fapi/v1/time" {
 			response := map[string]interface{}{
-				"symbol": "BTCUSDT",
-				"price":  "50000.0",
+				"serverTime": time.Now().UnixMilli(),
 			}
 			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/positionSide/dual" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/leverage" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"leverage": 10,
+				"symbol":   "BTCUSDT",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/positionRisk" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/exchangeInfo" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"symbols": []map[string]interface{}{
+					{
+						"symbol": "BTCUSDT",
+						"filters": []map[string]interface{}{
+							{
+								"filterType": "LOT_SIZE",
+								"stepSize":   "0.001",
+							},
+							{
+								"filterType": "PRICE_FILTER",
+								"tickSize":   "0.01",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/ticker/price" || r.URL.Path == "/fapi/v1/ticker/price" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"symbol": "BTCUSDT",
+					"price":  "50000.0",
+				},
+			})
 			return
 		}
 
@@ -151,9 +379,13 @@ func TestOrderStrategy_ConservativeHybrid_Success(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	trader := NewFuturesTrader("test_key", "test_secret", "test_user", "conservative_hybrid", -0.03, 5)
-	trader.client.BaseURL = mockServer.URL
-	trader.client.HTTPClient = mockServer.Client()
+	// Create a client configured to use the mock server
+	client := futures.NewClient("test_key", "test_secret")
+	client.BaseURL = mockServer.URL
+	client.HTTPClient = mockServer.Client()
+
+	// Create trader with the mocked client
+	trader := newFuturesTraderWithClient(client, "conservative_hybrid", -0.03, 5)
 
 	// 測試開多倉
 	result, err := trader.OpenLong("BTCUSDT", 100.0, 10)
@@ -163,12 +395,13 @@ func TestOrderStrategy_ConservativeHybrid_Success(t *testing.T) {
 
 	orderID, ok := result["orderId"].(int64)
 	if !ok || orderID != 12347 {
-		t.Errorf("預期 OrderID=12347, 實際 %v", result["orderId"])
+		t.Fatalf("預期 OrderID=12347, 實際 %v (type: %T)", result["orderId"], result["orderId"])
 	}
 
-	status, ok := result["status"].(string)
-	if !ok || status != "FILLED" {
-		t.Errorf("預期 Status=FILLED (限價單成交), 實際 %v", result["status"])
+	// Status might be OrderStatusType enum or string, so check the value not the type
+	statusStr := fmt.Sprintf("%v", result["status"])
+	if statusStr != "FILLED" {
+		t.Fatalf("預期 Status=FILLED (限價單成交), 實際 %v (type: %T)", result["status"], result["status"])
 	}
 
 	t.Logf("✅ conservative_hybrid 策略測試通過 - 限價單成功成交")
@@ -273,12 +506,78 @@ func TestOrderStrategy_ConservativeHybrid_Timeout(t *testing.T) {
 func TestOrderStrategy_ConservativeHybrid_LimitFail(t *testing.T) {
 	// Mock server - 模擬限價單創建失敗，立即降級為市價單
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/fapi/v1/ticker/price" {
+		// Mock initialization endpoints
+		if r.URL.Path == "/fapi/v1/time" {
 			response := map[string]interface{}{
-				"symbol": "BTCUSDT",
-				"price":  "50000.0",
+				"serverTime": time.Now().UnixMilli(),
 			}
 			json.NewEncoder(w).Encode(response)
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/positionSide/dual" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/leverage" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"leverage": 10,
+				"symbol":   "BTCUSDT",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/allOpenOrders" && r.Method == "DELETE" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"msg":  "success",
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/positionRisk" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v1/exchangeInfo" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"symbols": []map[string]interface{}{
+					{
+						"symbol": "BTCUSDT",
+						"filters": []map[string]interface{}{
+							{
+								"filterType": "LOT_SIZE",
+								"stepSize":   "0.001",
+							},
+							{
+								"filterType": "PRICE_FILTER",
+								"tickSize":   "0.01",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		if r.URL.Path == "/fapi/v2/ticker/price" || r.URL.Path == "/fapi/v1/ticker/price" {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{
+					"symbol": "BTCUSDT",
+					"price":  "50000.0",
+				},
+			})
 			return
 		}
 
@@ -309,9 +608,13 @@ func TestOrderStrategy_ConservativeHybrid_LimitFail(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	trader := NewFuturesTrader("test_key", "test_secret", "test_user", "conservative_hybrid", -0.03, 60)
-	trader.client.BaseURL = mockServer.URL
-	trader.client.HTTPClient = mockServer.Client()
+	// Create a client configured to use the mock server
+	client := futures.NewClient("test_key", "test_secret")
+	client.BaseURL = mockServer.URL
+	client.HTTPClient = mockServer.Client()
+
+	// Create trader with the mocked client
+	trader := newFuturesTraderWithClient(client, "conservative_hybrid", -0.03, 60)
 
 	// 測試開多倉 - 限價單失敗應該立即降級為市價單
 	result, err := trader.OpenLong("BTCUSDT", 100.0, 10)
@@ -321,12 +624,13 @@ func TestOrderStrategy_ConservativeHybrid_LimitFail(t *testing.T) {
 
 	orderID, ok := result["orderId"].(int64)
 	if !ok || orderID != 12350 {
-		t.Errorf("預期降級後的市價單 OrderID=12350, 實際 %v", result["orderId"])
+		t.Fatalf("預期降級後的市價單 OrderID=12350, 實際 %v (type: %T)", result["orderId"], result["orderId"])
 	}
 
-	status, ok := result["status"].(string)
-	if !ok || status != "FILLED" {
-		t.Errorf("預期市價單 Status=FILLED, 實際 %v", result["status"])
+	// Status might be OrderStatusType enum or string, so check the value not the type
+	statusStr := fmt.Sprintf("%v", result["status"])
+	if statusStr != "FILLED" {
+		t.Fatalf("預期市價單 Status=FILLED, 實際 %v (type: %T)", result["status"], result["status"])
 	}
 
 	t.Logf("✅ conservative_hybrid 策略降級測試通過 - 限價單失敗立即降級為市價單")

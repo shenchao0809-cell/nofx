@@ -75,6 +75,11 @@ func NewFuturesTrader(apiKey, secretKey string, userId string, orderStrategy str
 		client = hookRes.GetResult()
 	}
 
+	return newFuturesTraderWithClient(client, orderStrategy, limitPriceOffset, limitTimeoutSeconds)
+}
+
+// newFuturesTraderWithClient creates a trader with a pre-configured client (for testing)
+func newFuturesTraderWithClient(client *futures.Client, orderStrategy string, limitPriceOffset float64, limitTimeoutSeconds int) *FuturesTrader {
 	// 同步时间，避免 Timestamp ahead 错误
 	syncBinanceServerTime(client)
 	trader := &FuturesTrader{
