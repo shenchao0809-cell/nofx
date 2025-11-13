@@ -1413,17 +1413,19 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
               <div className="rounded-lg p-4 md:p-6" style={{ backgroundColor: '#1E2329', border: '1px solid #2B3139' }}>
                 <div className="flex items-start gap-3 md:gap-4">
                   <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-base md:text-lg font-bold"
-                       style={{ backgroundColor: '#474D57', color: '#fff' }}>
-                    3
+                       style={{ backgroundColor: (traders && traders.length > 0) ? '#0ECB81' : '#474D57', color: '#fff' }}>
+                    {(traders && traders.length > 0) ? '✓' : '3'}
                   </div>
                   <div className="flex-1 min-w-0">
                     <h3 className="text-base md:text-lg font-semibold mb-2" style={{ color: '#EAECEF' }}>
                       {t('quickStartStep3Title', language)}
                     </h3>
-                    <p className="text-xs md:text-sm mb-3" style={{ color: '#848E9C' }}>
-                      {configuredModels.length > 0 && configuredExchanges.length > 0
-                        ? t('step3Ready', language)
-                        : t('step3Description', language)}
+                    <p className="text-xs md:text-sm mb-3" style={{ color: (traders && traders.length > 0) ? '#0ECB81' : '#848E9C' }}>
+                      {(traders && traders.length > 0)
+                        ? `${t('step3Completed', language)}: ${traders.length} ${language === 'zh' ? '个交易员' : 'trader(s)'}`
+                        : (configuredModels.length > 0 && configuredExchanges.length > 0
+                          ? t('step3Ready', language)
+                          : t('step3Description', language))}
                     </p>
                     <button
                       onClick={() => setShowCreateModal(true)}

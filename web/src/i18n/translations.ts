@@ -168,6 +168,7 @@ export const translations = {
     quickStartStep3Title: 'Create AI Trader',
     step3Description: 'Complete steps 1 and 2 to enable trader creation',
     step3Ready: 'All set! Create your first trader now',
+    step3Completed: 'Created',
     goToSettings: 'Go to Settings',
 
     modelNotConfigured: 'Selected model is not configured',
@@ -1037,6 +1038,7 @@ export const translations = {
     quickStartStep3Title: '创建 AI 交易员',
     step3Description: '完成前两步后可创建交易员',
     step3Ready: '一切就绪，立即创建您的第一个交易员',
+    step3Completed: '已创建',
     goToSettings: '前往设置',
 
     modelNotConfigured: '所选模型未配置',
