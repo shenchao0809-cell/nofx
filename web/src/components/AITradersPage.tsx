@@ -37,6 +37,8 @@ import {
   HelpCircle,
   Radio,
   Pencil,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import { confirmToast } from '../lib/notify'
 import { toast } from 'sonner'
@@ -971,7 +973,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                         setInitialModelId(model.id)
                         setShowModelModal(true)
                       }}
-                      className="p-4 rounded-lg border-2 transition-all"
+                      className="p-4 rounded-lg border-2 transition-all hover:scale-[1.02]"
                       style={{
                         borderColor: '#2B3139',
                         backgroundColor: '#0B0E11',
@@ -1088,7 +1090,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                         setInitialExchangeId(exchange.id)
                         setShowExchangeModal(true)
                       }}
-                      className="p-4 rounded-lg border-2 transition-all"
+                      className="p-4 rounded-lg border-2 transition-all hover:scale-[1.02]"
                       style={{
                         borderColor: '#2B3139',
                         backgroundColor: '#0B0E11',
@@ -1327,6 +1329,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       }
                     </p>
                   </div>
+                  {configuredModels.length === 0 && (
+                    <button
+                      onClick={handleAddModel}
+                      className="flex-shrink-0 px-3 py-1.5 rounded text-xs font-semibold transition-all hover:scale-105"
+                      style={{
+                        background: '#F0B90B',
+                        color: '#000',
+                      }}
+                    >
+                      {language === 'zh' ? '配置AI模型' : 'Configure Model'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1348,6 +1362,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       }
                     </p>
                   </div>
+                  {configuredExchanges.length === 0 && (
+                    <button
+                      onClick={handleAddExchange}
+                      className="flex-shrink-0 px-3 py-1.5 rounded text-xs font-semibold transition-all hover:scale-105"
+                      style={{
+                        background: '#F0B90B',
+                        color: '#000',
+                      }}
+                    >
+                      {language === 'zh' ? '配置交易所' : 'Configure Exchange'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1707,6 +1733,7 @@ function ModelConfigModal({
   const [apiKey, setApiKey] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [modelName, setModelName] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
 
   // 获取当前编辑的模型信息 - 编辑时从已配置的模型中查找，新建时从所有支持的模型中查找
   const selectedModel = editingModelId
@@ -1906,19 +1933,30 @@ function ModelConfigModal({
                       </div>
                     ) : null
                   })()}
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={t('enterAPIKey', language)}
-                    className="w-full px-3 py-2 rounded"
-                    style={{
-                      background: '#0B0E11',
-                      border: '1px solid #2B3139',
-                      color: '#EAECEF',
-                    }}
-                    required
-                  />
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value.trim())}
+                      placeholder={t('enterAPIKey', language)}
+                      className="w-full px-3 py-2 pr-10 rounded"
+                      style={{
+                        background: '#0B0E11',
+                        border: '1px solid #2B3139',
+                        color: '#EAECEF',
+                      }}
+                      required
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded hover:bg-gray-700 transition-colors"
+                      style={{ color: '#848E9C' }}
+                      title={showApiKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+                    >
+                      {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -2081,6 +2119,11 @@ function ExchangeConfigModal({
   const [secureInputTarget, setSecureInputTarget] = useState<
     null | 'hyperliquid' | 'aster'
   >(null)
+
+  // 顯示/隱藏敏感資訊
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [showSecretKey, setShowSecretKey] = useState(false)
+  const [showAsterPrivateKey, setShowAsterPrivateKey] = useState(false)
 
   // 获取当前编辑的交易所信息
   const selectedExchange = allExchanges?.find(
@@ -2507,19 +2550,30 @@ function ExchangeConfigModal({
                         >
                           {t('apiKey', language)} <span style={{ color: '#F6465D' }}>*</span>
                         </label>
-                        <input
-                          type="password"
-                          value={apiKey}
-                          onChange={(e) => setApiKey(e.target.value)}
-                          placeholder={t('enterAPIKey', language)}
-                          className="w-full px-3 py-2 rounded"
-                          style={{
-                            background: '#0B0E11',
-                            border: '1px solid #2B3139',
-                            color: '#EAECEF',
-                          }}
-                          required
-                        />
+                        <div className="relative">
+                          <input
+                            type={showApiKey ? 'text' : 'password'}
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value.trim())}
+                            placeholder={t('enterAPIKey', language)}
+                            className="w-full px-3 py-2 pr-10 rounded"
+                            style={{
+                              background: '#0B0E11',
+                              border: '1px solid #2B3139',
+                              color: '#EAECEF',
+                            }}
+                            required
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded hover:bg-gray-700 transition-colors"
+                            style={{ color: '#848E9C' }}
+                            title={showApiKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+                          >
+                            {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
 
                       <div>
@@ -2529,19 +2583,30 @@ function ExchangeConfigModal({
                         >
                           {t('secretKey', language)} <span style={{ color: '#F6465D' }}>*</span>
                         </label>
-                        <input
-                          type="password"
-                          value={secretKey}
-                          onChange={(e) => setSecretKey(e.target.value)}
-                          placeholder={t('enterSecretKey', language)}
-                          className="w-full px-3 py-2 rounded"
-                          style={{
-                            background: '#0B0E11',
-                            border: '1px solid #2B3139',
-                            color: '#EAECEF',
-                          }}
-                          required
-                        />
+                        <div className="relative">
+                          <input
+                            type={showSecretKey ? 'text' : 'password'}
+                            value={secretKey}
+                            onChange={(e) => setSecretKey(e.target.value.trim())}
+                            placeholder={t('enterSecretKey', language)}
+                            className="w-full px-3 py-2 pr-10 rounded"
+                            style={{
+                              background: '#0B0E11',
+                              border: '1px solid #2B3139',
+                              color: '#EAECEF',
+                            }}
+                            required
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowSecretKey(!showSecretKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded hover:bg-gray-700 transition-colors"
+                            style={{ color: '#848E9C' }}
+                            title={showSecretKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+                          >
+                            {showSecretKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
 
                       {selectedExchange.id === 'okx' && (
@@ -2744,19 +2809,30 @@ function ExchangeConfigModal({
                           />
                         </Tooltip>
                       </label>
-                      <input
-                        type="password"
-                        value={asterPrivateKey}
-                        onChange={(e) => setAsterPrivateKey(e.target.value)}
-                        placeholder={t('enterPrivateKey', language)}
-                        className="w-full px-3 py-2 rounded"
-                        style={{
-                          background: '#0B0E11',
-                          border: '1px solid #2B3139',
-                          color: '#EAECEF',
-                        }}
-                        required
-                      />
+                      <div className="relative">
+                        <input
+                          type={showAsterPrivateKey ? 'text' : 'password'}
+                          value={asterPrivateKey}
+                          onChange={(e) => setAsterPrivateKey(e.target.value.trim())}
+                          placeholder={t('enterPrivateKey', language)}
+                          className="w-full px-3 py-2 pr-10 rounded"
+                          style={{
+                            background: '#0B0E11',
+                            border: '1px solid #2B3139',
+                            color: '#EAECEF',
+                          }}
+                          required
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowAsterPrivateKey(!showAsterPrivateKey)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded hover:bg-gray-700 transition-colors"
+                          style={{ color: '#848E9C' }}
+                          title={showAsterPrivateKey ? (language === 'zh' ? '隐藏' : 'Hide') : (language === 'zh' ? '显示' : 'Show')}
+                        >
+                          {showAsterPrivateKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
                     </div>
                   </>
                 )}
