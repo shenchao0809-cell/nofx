@@ -168,7 +168,12 @@ func TestXSSProtection(t *testing.T) {
 	}
 
 	for _, payload := range xssPayloads {
-		t.Run("XSS_"+payload[:20], func(t *testing.T) {
+		// Safely truncate payload for test name
+		testName := payload
+		if len(payload) > 20 {
+			testName = payload[:20]
+		}
+		t.Run("XSS_"+testName, func(t *testing.T) {
 			reqBody := map[string]interface{}{
 				"name":          payload,
 				"ai_model_id":   "deepseek",
@@ -194,7 +199,12 @@ func TestXSSProtection(t *testing.T) {
 				t.Errorf("Response contains unescaped script tag")
 			}
 
-			t.Logf("✅ XSS payload rejected: %s", payload[:30])
+			// Safely truncate payload for logging
+			logPayload := payload
+			if len(payload) > 30 {
+				logPayload = payload[:30]
+			}
+			t.Logf("✅ XSS payload rejected: %s", logPayload)
 		})
 	}
 }
