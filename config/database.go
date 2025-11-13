@@ -261,6 +261,7 @@ func (d *Database) createTables() error {
 		`ALTER TABLE traders ADD COLUMN order_strategy TEXT DEFAULT 'conservative_hybrid'`, // Order strategy: market_only, conservative_hybrid, limit_only
 		`ALTER TABLE traders ADD COLUMN limit_price_offset REAL DEFAULT -0.03`,             // Limit order price offset percentage (e.g., -0.03 for -0.03%)
 		`ALTER TABLE traders ADD COLUMN limit_timeout_seconds INTEGER DEFAULT 60`,          // Timeout in seconds before converting to market order
+		`ALTER TABLE traders ADD COLUMN timeframes TEXT DEFAULT '4h'`,                      // 时间线选择 (逗号分隔，例如: "1m,4h,1d")
 		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,                  // 自定义API地址
 		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,               // 自定义模型名称
 	}
@@ -1225,9 +1226,9 @@ func (d *Database) CreateExchange(userID, id, name, typ string, enabled bool, ap
 // CreateTrader 创建交易员
 func (d *Database) CreateTrader(trader *TraderRecord) error {
 	_, err := d.db.Exec(`
-		INSERT INTO traders (id, user_id, name, ai_model_id, exchange_id, initial_balance, scan_interval_minutes, is_running, btc_eth_leverage, altcoin_leverage, trading_symbols, use_coin_pool, use_oi_top, custom_prompt, override_base_prompt, system_prompt_template, is_cross_margin, taker_fee_rate, maker_fee_rate)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, trader.ID, trader.UserID, trader.Name, trader.AIModelID, trader.ExchangeID, trader.InitialBalance, trader.ScanIntervalMinutes, trader.IsRunning, trader.BTCETHLeverage, trader.AltcoinLeverage, trader.TradingSymbols, trader.UseCoinPool, trader.UseOITop, trader.CustomPrompt, trader.OverrideBasePrompt, trader.SystemPromptTemplate, trader.IsCrossMargin, trader.TakerFeeRate, trader.MakerFeeRate)
+		INSERT INTO traders (id, user_id, name, ai_model_id, exchange_id, initial_balance, scan_interval_minutes, is_running, btc_eth_leverage, altcoin_leverage, trading_symbols, use_coin_pool, use_oi_top, custom_prompt, override_base_prompt, system_prompt_template, is_cross_margin, taker_fee_rate, maker_fee_rate, order_strategy, limit_price_offset, limit_timeout_seconds, timeframes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, trader.ID, trader.UserID, trader.Name, trader.AIModelID, trader.ExchangeID, trader.InitialBalance, trader.ScanIntervalMinutes, trader.IsRunning, trader.BTCETHLeverage, trader.AltcoinLeverage, trader.TradingSymbols, trader.UseCoinPool, trader.UseOITop, trader.CustomPrompt, trader.OverrideBasePrompt, trader.SystemPromptTemplate, trader.IsCrossMargin, trader.TakerFeeRate, trader.MakerFeeRate, trader.OrderStrategy, trader.LimitPriceOffset, trader.LimitTimeoutSeconds, trader.Timeframes)
 	return err
 }
 
@@ -1245,6 +1246,7 @@ func (d *Database) GetTraders(userID string) ([]*TraderRecord, error) {
 		       COALESCE(order_strategy, 'conservative_hybrid') as order_strategy,
 		       COALESCE(limit_price_offset, -0.03) as limit_price_offset,
 		       COALESCE(limit_timeout_seconds, 60) as limit_timeout_seconds,
+		       COALESCE(timeframes, '4h') as timeframes,
 		       created_at, updated_at
 		FROM traders WHERE user_id = ? ORDER BY created_at DESC
 	`, userID)
@@ -1265,6 +1267,7 @@ func (d *Database) GetTraders(userID string) ([]*TraderRecord, error) {
 			&trader.IsCrossMargin,
 			&trader.TakerFeeRate, &trader.MakerFeeRate,
 			&trader.OrderStrategy, &trader.LimitPriceOffset, &trader.LimitTimeoutSeconds,
+			&trader.Timeframes,
 			&trader.CreatedAt, &trader.UpdatedAt,
 		)
 		if err != nil {
@@ -1290,12 +1293,14 @@ func (d *Database) UpdateTrader(trader *TraderRecord) error {
 			scan_interval_minutes = ?, btc_eth_leverage = ?, altcoin_leverage = ?,
 			trading_symbols = ?, custom_prompt = ?, override_base_prompt = ?,
 			system_prompt_template = ?, is_cross_margin = ?, taker_fee_rate = ?, maker_fee_rate = ?,
+			order_strategy = ?, limit_price_offset = ?, limit_timeout_seconds = ?, timeframes = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND user_id = ?
 	`, trader.Name, trader.AIModelID, trader.ExchangeID, trader.InitialBalance,
 		trader.ScanIntervalMinutes, trader.BTCETHLeverage, trader.AltcoinLeverage,
 		trader.TradingSymbols, trader.CustomPrompt, trader.OverrideBasePrompt,
 		trader.SystemPromptTemplate, trader.IsCrossMargin, trader.TakerFeeRate, trader.MakerFeeRate,
+		trader.OrderStrategy, trader.LimitPriceOffset, trader.LimitTimeoutSeconds, trader.Timeframes,
 		trader.ID, trader.UserID)
 	return err
 }
@@ -1338,6 +1343,10 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 			COALESCE(t.is_cross_margin, 1) as is_cross_margin,
 			COALESCE(t.taker_fee_rate, 0.0004) as taker_fee_rate,
 			COALESCE(t.maker_fee_rate, 0.0002) as maker_fee_rate,
+			COALESCE(t.order_strategy, 'conservative_hybrid') as order_strategy,
+			COALESCE(t.limit_price_offset, -0.03) as limit_price_offset,
+			COALESCE(t.limit_timeout_seconds, 60) as limit_timeout_seconds,
+			COALESCE(t.timeframes, '4h') as timeframes,
 			t.created_at, t.updated_at,
 			a.id, a.model_id, a.user_id, a.name, a.provider, a.enabled, a.api_key,
 			COALESCE(a.custom_api_url, '') as custom_api_url,
@@ -1361,6 +1370,8 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 		&trader.CustomPrompt, &trader.OverrideBasePrompt, &trader.SystemPromptTemplate,
 		&trader.IsCrossMargin,
 		&trader.TakerFeeRate, &trader.MakerFeeRate,
+		&trader.OrderStrategy, &trader.LimitPriceOffset, &trader.LimitTimeoutSeconds,
+		&trader.Timeframes,
 		&trader.CreatedAt, &trader.UpdatedAt,
 		&aiModel.ID, &aiModel.ModelID, &aiModel.UserID, &aiModel.Name, &aiModel.Provider, &aiModel.Enabled, &aiModel.APIKey,
 		&aiModel.CustomAPIURL, &aiModel.CustomModelName,
