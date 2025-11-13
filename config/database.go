@@ -247,22 +247,22 @@ func (d *Database) createTables() error {
 		`ALTER TABLE exchanges ADD COLUMN aster_private_key TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN custom_prompt TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN override_base_prompt BOOLEAN DEFAULT 0`,
-		`ALTER TABLE traders ADD COLUMN is_cross_margin BOOLEAN DEFAULT 1`,             // 默认为全仓模式
-		`ALTER TABLE traders ADD COLUMN use_default_coins BOOLEAN DEFAULT 1`,           // 默认使用默认币种
-		`ALTER TABLE traders ADD COLUMN custom_coins TEXT DEFAULT ''`,                  // 自定义币种列表（JSON格式）
-		`ALTER TABLE traders ADD COLUMN btc_eth_leverage INTEGER DEFAULT 5`,            // BTC/ETH杠杆倍数
-		`ALTER TABLE traders ADD COLUMN altcoin_leverage INTEGER DEFAULT 5`,            // 山寨币杠杆倍数
-		`ALTER TABLE traders ADD COLUMN trading_symbols TEXT DEFAULT ''`,               // 交易币种，逗号分隔
-		`ALTER TABLE traders ADD COLUMN use_coin_pool BOOLEAN DEFAULT 0`,               // 是否使用COIN POOL信号源
-		`ALTER TABLE traders ADD COLUMN use_oi_top BOOLEAN DEFAULT 0`,                  // 是否使用OI TOP信号源
-		`ALTER TABLE traders ADD COLUMN system_prompt_template TEXT DEFAULT 'default'`, // 系统提示词模板名称
-		`ALTER TABLE traders ADD COLUMN taker_fee_rate REAL DEFAULT 0.0004`,            // Taker fee rate, default 0.0004
-		`ALTER TABLE traders ADD COLUMN maker_fee_rate REAL DEFAULT 0.0002`,            // Maker fee rate, default 0.0002
-		`ALTER TABLE traders ADD COLUMN order_strategy TEXT DEFAULT 'conservative_hybrid'`,  // Order strategy: market_only, conservative_hybrid, limit_only
-		`ALTER TABLE traders ADD COLUMN limit_price_offset REAL DEFAULT -0.03`,         // Limit order price offset percentage (e.g., -0.03 for -0.03%)
-		`ALTER TABLE traders ADD COLUMN limit_timeout_seconds INTEGER DEFAULT 60`,      // Timeout in seconds before converting to market order
-		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,              // 自定义API地址
-		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,           // 自定义模型名称
+		`ALTER TABLE traders ADD COLUMN is_cross_margin BOOLEAN DEFAULT 1`,                 // 默认为全仓模式
+		`ALTER TABLE traders ADD COLUMN use_default_coins BOOLEAN DEFAULT 1`,               // 默认使用默认币种
+		`ALTER TABLE traders ADD COLUMN custom_coins TEXT DEFAULT ''`,                      // 自定义币种列表（JSON格式）
+		`ALTER TABLE traders ADD COLUMN btc_eth_leverage INTEGER DEFAULT 5`,                // BTC/ETH杠杆倍数
+		`ALTER TABLE traders ADD COLUMN altcoin_leverage INTEGER DEFAULT 5`,                // 山寨币杠杆倍数
+		`ALTER TABLE traders ADD COLUMN trading_symbols TEXT DEFAULT ''`,                   // 交易币种，逗号分隔
+		`ALTER TABLE traders ADD COLUMN use_coin_pool BOOLEAN DEFAULT 0`,                   // 是否使用COIN POOL信号源
+		`ALTER TABLE traders ADD COLUMN use_oi_top BOOLEAN DEFAULT 0`,                      // 是否使用OI TOP信号源
+		`ALTER TABLE traders ADD COLUMN system_prompt_template TEXT DEFAULT 'default'`,     // 系统提示词模板名称
+		`ALTER TABLE traders ADD COLUMN taker_fee_rate REAL DEFAULT 0.0004`,                // Taker fee rate, default 0.0004
+		`ALTER TABLE traders ADD COLUMN maker_fee_rate REAL DEFAULT 0.0002`,                // Maker fee rate, default 0.0002
+		`ALTER TABLE traders ADD COLUMN order_strategy TEXT DEFAULT 'conservative_hybrid'`, // Order strategy: market_only, conservative_hybrid, limit_only
+		`ALTER TABLE traders ADD COLUMN limit_price_offset REAL DEFAULT -0.03`,             // Limit order price offset percentage (e.g., -0.03 for -0.03%)
+		`ALTER TABLE traders ADD COLUMN limit_timeout_seconds INTEGER DEFAULT 60`,          // Timeout in seconds before converting to market order
+		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,                  // 自定义API地址
+		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,               // 自定义模型名称
 	}
 
 	for _, query := range alterQueries {
@@ -744,10 +744,10 @@ type User struct {
 
 // AIModelConfig AI模型配置
 type AIModelConfig struct {
-	ID              int       `json:"id"`              // 自增ID（主键）
-	ModelID         string    `json:"model_id"`        // 模型类型ID（例如 "deepseek"）
+	ID              int       `json:"id"`       // 自增ID（主键）
+	ModelID         string    `json:"model_id"` // 模型类型ID（例如 "deepseek"）
 	UserID          string    `json:"user_id"`
-	DisplayName     string    `json:"display_name"`    // 用户自定义显示名称
+	DisplayName     string    `json:"display_name"` // 用户自定义显示名称
 	Name            string    `json:"name"`
 	Provider        string    `json:"provider"`
 	Enabled         bool      `json:"enabled"`
@@ -760,16 +760,16 @@ type AIModelConfig struct {
 
 // ExchangeConfig 交易所配置
 type ExchangeConfig struct {
-	ID         int    `json:"id"`          // 自增ID（主键）
-	ExchangeID string `json:"exchange_id"` // 交易所类型ID（例如 "binance"）
-	UserID     string `json:"user_id"`
+	ID          int    `json:"id"`          // 自增ID（主键）
+	ExchangeID  string `json:"exchange_id"` // 交易所类型ID（例如 "binance"）
+	UserID      string `json:"user_id"`
 	DisplayName string `json:"display_name"` // 用户自定义显示名称
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Enabled    bool   `json:"enabled"`
-	APIKey     string `json:"apiKey"`    // For Binance: API Key; For Hyperliquid: Agent Private Key (should have ~0 balance)
-	SecretKey  string `json:"secretKey"` // For Binance: Secret Key; Not used for Hyperliquid
-	Testnet    bool   `json:"testnet"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Enabled     bool   `json:"enabled"`
+	APIKey      string `json:"apiKey"`    // For Binance: API Key; For Hyperliquid: Agent Private Key (should have ~0 balance)
+	SecretKey   string `json:"secretKey"` // For Binance: Secret Key; Not used for Hyperliquid
+	Testnet     bool   `json:"testnet"`
 	// Hyperliquid Agent Wallet configuration (following official best practices)
 	// Reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets
 	HyperliquidWalletAddr string `json:"hyperliquidWalletAddr"` // Main Wallet Address (holds funds, never expose private key)
@@ -786,8 +786,8 @@ type TraderRecord struct {
 	ID                   string    `json:"id"`
 	UserID               string    `json:"user_id"`
 	Name                 string    `json:"name"`
-	AIModelID            int       `json:"ai_model_id"`   // 外键：指向 ai_models.id
-	ExchangeID           int       `json:"exchange_id"`   // 外键：指向 exchanges.id
+	AIModelID            int       `json:"ai_model_id"` // 外键：指向 ai_models.id
+	ExchangeID           int       `json:"exchange_id"` // 外键：指向 exchanges.id
 	InitialBalance       float64   `json:"initial_balance"`
 	ScanIntervalMinutes  int       `json:"scan_interval_minutes"`
 	IsRunning            bool      `json:"is_running"`
@@ -935,7 +935,7 @@ func (d *Database) UpdateUserPassword(userID, passwordHash string) error {
 // GetAIModels 获取用户的AI模型配置
 func (d *Database) GetAIModels(userID string) ([]*AIModelConfig, error) {
 	rows, err := d.db.Query(`
-		SELECT id, user_id, name, provider, enabled, api_key,
+		SELECT id, model_id, user_id, name, provider, enabled, api_key,
 		       COALESCE(custom_api_url, '') as custom_api_url,
 		       COALESCE(custom_model_name, '') as custom_model_name,
 		       created_at, updated_at
@@ -951,7 +951,7 @@ func (d *Database) GetAIModels(userID string) ([]*AIModelConfig, error) {
 	for rows.Next() {
 		var model AIModelConfig
 		err := rows.Scan(
-			&model.ID, &model.UserID, &model.Name, &model.Provider,
+			&model.ID, &model.ModelID, &model.UserID, &model.Name, &model.Provider,
 			&model.Enabled, &model.APIKey, &model.CustomAPIURL, &model.CustomModelName,
 			&model.CreatedAt, &model.UpdatedAt,
 		)
@@ -1053,12 +1053,12 @@ func (d *Database) UpdateAIModel(userID, id string, enabled bool, apiKey, custom
 // GetExchanges 获取用户的交易所配置
 func (d *Database) GetExchanges(userID string) ([]*ExchangeConfig, error) {
 	rows, err := d.db.Query(`
-		SELECT id, user_id, name, type, enabled, api_key, secret_key, testnet, 
+		SELECT id, exchange_id, user_id, name, type, enabled, api_key, secret_key, testnet,
 		       COALESCE(hyperliquid_wallet_addr, '') as hyperliquid_wallet_addr,
 		       COALESCE(aster_user, '') as aster_user,
 		       COALESCE(aster_signer, '') as aster_signer,
 		       COALESCE(aster_private_key, '') as aster_private_key,
-		       created_at, updated_at 
+		       created_at, updated_at
 		FROM exchanges WHERE user_id = ? ORDER BY id
 	`, userID)
 	if err != nil {
@@ -1071,7 +1071,7 @@ func (d *Database) GetExchanges(userID string) ([]*ExchangeConfig, error) {
 	for rows.Next() {
 		var exchange ExchangeConfig
 		err := rows.Scan(
-			&exchange.ID, &exchange.UserID, &exchange.Name, &exchange.Type,
+			&exchange.ID, &exchange.ExchangeID, &exchange.UserID, &exchange.Name, &exchange.Type,
 			&exchange.Enabled, &exchange.APIKey, &exchange.SecretKey, &exchange.Testnet,
 			&exchange.HyperliquidWalletAddr, &exchange.AsterUser,
 			&exchange.AsterSigner, &exchange.AsterPrivateKey,
