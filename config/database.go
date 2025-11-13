@@ -1339,19 +1339,19 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 			COALESCE(t.taker_fee_rate, 0.0004) as taker_fee_rate,
 			COALESCE(t.maker_fee_rate, 0.0002) as maker_fee_rate,
 			t.created_at, t.updated_at,
-			a.id, a.user_id, a.name, a.provider, a.enabled, a.api_key,
+			a.id, a.model_id, a.user_id, a.name, a.provider, a.enabled, a.api_key,
 			COALESCE(a.custom_api_url, '') as custom_api_url,
 			COALESCE(a.custom_model_name, '') as custom_model_name,
 			a.created_at, a.updated_at,
-			e.id, e.user_id, e.name, e.type, e.enabled, e.api_key, e.secret_key, e.testnet,
+			e.id, e.exchange_id, e.user_id, e.name, e.type, e.enabled, e.api_key, e.secret_key, e.testnet,
 			COALESCE(e.hyperliquid_wallet_addr, '') as hyperliquid_wallet_addr,
 			COALESCE(e.aster_user, '') as aster_user,
 			COALESCE(e.aster_signer, '') as aster_signer,
 			COALESCE(e.aster_private_key, '') as aster_private_key,
 			e.created_at, e.updated_at
 		FROM traders t
-		JOIN ai_models a ON t.ai_model_id = a.id AND t.user_id = a.user_id
-		JOIN exchanges e ON t.exchange_id = e.id AND t.user_id = e.user_id
+		JOIN ai_models a ON t.ai_model_id = a.model_id AND t.user_id = a.user_id
+		JOIN exchanges e ON t.exchange_id = e.exchange_id AND t.user_id = e.user_id
 		WHERE t.id = ? AND t.user_id = ?
 	`, traderID, userID).Scan(
 		&trader.ID, &trader.UserID, &trader.Name, &trader.AIModelID, &trader.ExchangeID,
@@ -1362,10 +1362,10 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 		&trader.IsCrossMargin,
 		&trader.TakerFeeRate, &trader.MakerFeeRate,
 		&trader.CreatedAt, &trader.UpdatedAt,
-		&aiModel.ID, &aiModel.UserID, &aiModel.Name, &aiModel.Provider, &aiModel.Enabled, &aiModel.APIKey,
+		&aiModel.ID, &aiModel.ModelID, &aiModel.UserID, &aiModel.Name, &aiModel.Provider, &aiModel.Enabled, &aiModel.APIKey,
 		&aiModel.CustomAPIURL, &aiModel.CustomModelName,
 		&aiModel.CreatedAt, &aiModel.UpdatedAt,
-		&exchange.ID, &exchange.UserID, &exchange.Name, &exchange.Type, &exchange.Enabled,
+		&exchange.ID, &exchange.ExchangeID, &exchange.UserID, &exchange.Name, &exchange.Type, &exchange.Enabled,
 		&exchange.APIKey, &exchange.SecretKey, &exchange.Testnet,
 		&exchange.HyperliquidWalletAddr, &exchange.AsterUser, &exchange.AsterSigner, &exchange.AsterPrivateKey,
 		&exchange.CreatedAt, &exchange.UpdatedAt,
