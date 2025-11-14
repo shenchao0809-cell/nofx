@@ -50,6 +50,9 @@ export interface DecisionAction {
   timestamp: string
   success: boolean
   error: string
+  reason?: string
+  close_reason?: string
+  pnl?: number
 }
 
 // 决策记录

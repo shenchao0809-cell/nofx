@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"nofx/decision"
 	"nofx/hook"
 	"strconv"
 	"strings"
@@ -59,10 +60,15 @@ type FuturesTrader struct {
 
 	// 缓存有效期（15秒）
 	cacheDuration time.Duration
+
+	// 订单策略配置
+	orderStrategy       string  // Order strategy: "market_only", "conservative_hybrid", "limit_only"
+	limitPriceOffset    float64 // Limit order price offset percentage (e.g., -0.03 for -0.03%)
+	limitTimeoutSeconds int     // Timeout in seconds before converting to market order
 }
 
 // NewFuturesTrader 创建合约交易器
-func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
+func NewFuturesTrader(apiKey, secretKey string, userId string, orderStrategy string, limitPriceOffset float64, limitTimeoutSeconds int) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)
 
 	hookRes := hook.HookExec[hook.NewBinanceTraderResult](hook.NEW_BINANCE_TRADER, userId, client)
@@ -70,11 +76,19 @@ func NewFuturesTrader(apiKey, secretKey string, userId string) *FuturesTrader {
 		client = hookRes.GetResult()
 	}
 
+	return newFuturesTraderWithClient(client, orderStrategy, limitPriceOffset, limitTimeoutSeconds)
+}
+
+// newFuturesTraderWithClient creates a trader with a pre-configured client (for testing)
+func newFuturesTraderWithClient(client *futures.Client, orderStrategy string, limitPriceOffset float64, limitTimeoutSeconds int) *FuturesTrader {
 	// 同步时间，避免 Timestamp ahead 错误
 	syncBinanceServerTime(client)
 	trader := &FuturesTrader{
-		client:        client,
-		cacheDuration: 15 * time.Second, // 15秒缓存
+		client:              client,
+		cacheDuration:       15 * time.Second, // 15秒缓存
+		orderStrategy:       orderStrategy,
+		limitPriceOffset:    limitPriceOffset,
+		limitTimeoutSeconds: limitTimeoutSeconds,
 	}
 
 	// 设置双向持仓模式（Hedge Mode）
@@ -106,6 +120,30 @@ func (t *FuturesTrader) setDualSidePosition() error {
 	log.Printf("  ✓ 账户已切换为双向持仓模式（Hedge Mode）")
 	log.Printf("  ℹ️  双向持仓模式允许同时持有多单和空单")
 	return nil
+}
+
+// InvalidateBalanceCache 清除余额缓存（交易后调用以确保数据实时性）
+func (t *FuturesTrader) InvalidateBalanceCache() {
+	t.balanceCacheMutex.Lock()
+	t.cachedBalance = nil
+	t.balanceCacheTime = time.Time{} // 重置时间为零值
+	t.balanceCacheMutex.Unlock()
+	log.Printf("🔄 已清除余额缓存（交易后自动刷新）")
+}
+
+// InvalidatePositionsCache 清除持仓缓存（交易后调用以确保数据实时性）
+func (t *FuturesTrader) InvalidatePositionsCache() {
+	t.positionsCacheMutex.Lock()
+	t.cachedPositions = nil
+	t.positionsCacheTime = time.Time{} // 重置时间为零值
+	t.positionsCacheMutex.Unlock()
+	log.Printf("🔄 已清除持仓缓存（交易后自动刷新）")
+}
+
+// InvalidateAllCaches 清除所有缓存（重大交易操作后调用）
+func (t *FuturesTrader) InvalidateAllCaches() {
+	t.InvalidateBalanceCache()
+	t.InvalidatePositionsCache()
 }
 
 // syncBinanceServerTime 同步币安服务器时间，确保请求时间戳合法
@@ -312,6 +350,169 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
+// GetCurrentPrice 获取当前市场价格
+func (t *FuturesTrader) GetCurrentPrice(symbol string) (float64, error) {
+	prices, err := t.client.NewListPricesService().Symbol(symbol).Do(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("获取价格失败: %w", err)
+	}
+	if len(prices) == 0 {
+		return 0, fmt.Errorf("未找到 %s 的价格", symbol)
+	}
+	price, err := strconv.ParseFloat(prices[0].Price, 64)
+	if err != nil {
+		return 0, fmt.Errorf("解析价格失败: %w", err)
+	}
+	return price, nil
+}
+
+// FormatPrice 格式化价格到交易所要求的精度
+func (t *FuturesTrader) FormatPrice(symbol string, price float64) (string, error) {
+	// 获取交易对信息
+	info, err := t.client.NewExchangeInfoService().Do(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("获取交易对信息失败: %w", err)
+	}
+
+	// 查找对应的symbol信息
+	for _, s := range info.Symbols {
+		if s.Symbol == symbol {
+			// 找到价格精度过滤器
+			for _, filter := range s.Filters {
+				if filter["filterType"] == "PRICE_FILTER" {
+					tickSizeStr := filter["tickSize"].(string)
+					tickSize, err := strconv.ParseFloat(tickSizeStr, 64)
+					if err != nil {
+						return "", fmt.Errorf("解析tickSize失败: %w", err)
+					}
+
+					// 计算精度
+					precision := 0
+					temp := tickSize
+					for temp < 1 {
+						temp *= 10
+						precision++
+					}
+
+					// 格式化价格
+					format := fmt.Sprintf("%%.%df", precision)
+					return fmt.Sprintf(format, price), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("未找到 %s 的价格精度信息", symbol)
+}
+
+// QueryOrderStatus 查询订单状态
+func (t *FuturesTrader) QueryOrderStatus(symbol string, orderID int64) (string, error) {
+	order, err := t.client.NewGetOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("查询订单状态失败: %w", err)
+	}
+	return string(order.Status), nil
+}
+
+// CancelOrder 取消订单
+func (t *FuturesTrader) CancelOrder(symbol string, orderID int64) error {
+	_, err := t.client.NewCancelOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("取消订单失败: %w", err)
+	}
+	return nil
+}
+
+// monitorAndConvertLimitOrder 监控限价单并在超时时转换为市价单
+// 返回值：最终订单结果, 是否发生了降级, error
+func (t *FuturesTrader) monitorAndConvertLimitOrder(
+	symbol string,
+	orderID int64,
+	side futures.SideType,
+	positionSide futures.PositionSideType,
+	quantityStr string,
+) (map[string]interface{}, bool, error) {
+	log.Printf("⏱️  [%s] 开始监控限价单 OrderID=%d，超时时间 %d 秒", symbol, orderID, t.limitTimeoutSeconds)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	startTime := time.Now()
+	timeout := time.Duration(t.limitTimeoutSeconds) * time.Second
+
+	for {
+		select {
+		case <-ticker.C:
+			// 查询订单状态
+			status, err := t.QueryOrderStatus(symbol, orderID)
+			if err != nil {
+				log.Printf("⚠️  [%s] 查询订单状态失败: %v", symbol, err)
+				continue
+			}
+
+			// 检查是否成交
+			if status == string(futures.OrderStatusTypeFilled) {
+				log.Printf("✅ [%s] 限价单已成交 OrderID=%d", symbol, orderID)
+				result := make(map[string]interface{})
+				result["orderId"] = orderID
+				result["symbol"] = symbol
+				result["status"] = status
+				result["converted"] = false
+				return result, false, nil
+			}
+
+			// 检查是否超时
+			elapsed := time.Since(startTime)
+			if elapsed >= timeout {
+				log.Printf("⏰ [%s] 限价单超时未成交 (%.1f秒)，转换为市价单", symbol, elapsed.Seconds())
+
+				// 取消限价单
+				if err := t.CancelOrder(symbol, orderID); err != nil {
+					log.Printf("⚠️  [%s] 取消限价单失败: %v，但继续尝试创建市价单", symbol, err)
+				} else {
+					log.Printf("✓ [%s] 已取消限价单 OrderID=%d", symbol, orderID)
+				}
+
+				// 创建市价单
+				log.Printf("📋 [%s] 创建市价单替代限价单", symbol)
+				marketOrder, err := t.client.NewCreateOrderService().
+					Symbol(symbol).
+					Side(side).
+					PositionSide(positionSide).
+					Type(futures.OrderTypeMarket).
+					Quantity(quantityStr).
+					NewClientOrderID(getBrOrderID()).
+					Do(context.Background())
+
+				if err != nil {
+					return nil, true, fmt.Errorf("超时转换为市价单失败: %w", err)
+				}
+
+				log.Printf("✅ [%s] 市价单创建成功 OrderID=%d (从限价单降级)", symbol, marketOrder.OrderID)
+				result := make(map[string]interface{})
+				result["orderId"] = marketOrder.OrderID
+				result["symbol"] = marketOrder.Symbol
+				result["status"] = marketOrder.Status
+				result["converted"] = true
+				result["originalOrderId"] = orderID
+				return result, true, nil
+			}
+
+			// 显示进度
+			remaining := timeout - elapsed
+			if int(remaining.Seconds())%10 == 0 && remaining.Seconds() > 0 {
+				log.Printf("⏱️  [%s] 等待限价单成交... 剩余 %.0f 秒", symbol, remaining.Seconds())
+			}
+		}
+	}
+}
+
 // OpenLong 开多仓
 func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
 	// 先取消该币种的所有委托单（清理旧的止损止盈单）
@@ -343,22 +544,103 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 		return nil, err
 	}
 
-	// 创建市价买入订单（使用br ID）
-	order, err := t.client.NewCreateOrderService().
-		Symbol(symbol).
-		Side(futures.SideTypeBuy).
-		PositionSide(futures.PositionSideTypeLong).
-		Type(futures.OrderTypeMarket).
-		Quantity(quantityStr).
-		NewClientOrderID(getBrOrderID()).
-		Do(context.Background())
+	// 根据订单策略创建订单
+	var order *futures.CreateOrderResponse
+	if t.orderStrategy == "market_only" {
+		// 纯市价单策略
+		log.Printf("📋 [%s] 使用市价单策略", symbol)
+		order, err = t.client.NewCreateOrderService().
+			Symbol(symbol).
+			Side(futures.SideTypeBuy).
+			PositionSide(futures.PositionSideTypeLong).
+			Type(futures.OrderTypeMarket).
+			Quantity(quantityStr).
+			NewClientOrderID(getBrOrderID()).
+			Do(context.Background())
+	} else {
+		// 限价单策略（conservative_hybrid 或 limit_only）
+		currentPrice, priceErr := t.GetCurrentPrice(symbol)
+		if priceErr != nil {
+			return nil, fmt.Errorf("获取当前价格失败: %w", priceErr)
+		}
+
+		// 计算限价：多仓使用 currentPrice * (1 + offset)
+		// offset 为负数（如 -0.03），所以实际价格会低于市价
+		limitPrice := currentPrice * (1 + t.limitPriceOffset/100)
+		limitPriceStr, formatErr := t.FormatPrice(symbol, limitPrice)
+		if formatErr != nil {
+			return nil, fmt.Errorf("格式化限价失败: %w", formatErr)
+		}
+
+		log.Printf("📋 [%s] 使用限价单策略: 当前价 %.6f, 限价 %s (偏移 %.2f%%)",
+			symbol, currentPrice, limitPriceStr, t.limitPriceOffset)
+
+		order, err = t.client.NewCreateOrderService().
+			Symbol(symbol).
+			Side(futures.SideTypeBuy).
+			PositionSide(futures.PositionSideTypeLong).
+			Type(futures.OrderTypeLimit).
+			Quantity(quantityStr).
+			Price(limitPriceStr).
+			TimeInForce(futures.TimeInForceTypeGTC). // Good Till Cancel
+			NewClientOrderID(getBrOrderID()).
+			Do(context.Background())
+
+		if err != nil {
+			log.Printf("⚠️ 限价单创建失败: %v", err)
+			// 如果是 conservative_hybrid 策略，失败后可以降级到市价单
+			if t.orderStrategy == "conservative_hybrid" {
+				log.Printf("📋 [%s] 限价单失败，降级为市价单", symbol)
+				order, err = t.client.NewCreateOrderService().
+					Symbol(symbol).
+					Side(futures.SideTypeBuy).
+					PositionSide(futures.PositionSideTypeLong).
+					Type(futures.OrderTypeMarket).
+					Quantity(quantityStr).
+					NewClientOrderID(getBrOrderID()).
+					Do(context.Background())
+			}
+		} else {
+			// 限价单创建成功
+			log.Printf("✓ 限价单创建成功: %s OrderID=%d", symbol, order.OrderID)
+
+			// 如果是 conservative_hybrid 策略，启动监控并在超时时转换为市价单
+			if t.orderStrategy == "conservative_hybrid" {
+				result, converted, monitorErr := t.monitorAndConvertLimitOrder(
+					symbol,
+					order.OrderID,
+					futures.SideTypeBuy,
+					futures.PositionSideTypeLong,
+					quantityStr,
+				)
+				if monitorErr != nil {
+					return nil, fmt.Errorf("监控限价单失败: %w", monitorErr)
+				}
+
+				if converted {
+					log.Printf("✓ 开多仓成功（限价单超时转市价单）: %s 数量: %s", symbol, quantityStr)
+				} else {
+					log.Printf("✓ 开多仓成功（限价单成交）: %s 数量: %s", symbol, quantityStr)
+				}
+				// 交易成功后清除缓存
+				t.InvalidateAllCaches()
+				return result, nil
+			}
+
+			// limit_only 策略：直接返回限价单结果，不监控
+			log.Printf("✓ 限价单已提交: %s 数量: %s (limit_only 模式，不自动转换)", symbol, quantityStr)
+		}
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("开多仓失败: %w", err)
 	}
 
-	log.Printf("✓ 开多仓成功: %s 数量: %s", symbol, quantityStr)
-	log.Printf("  订单ID: %d", order.OrderID)
+	log.Printf("✓ 开多仓成功: %s 数量: %s 类型: %s", symbol, quantityStr, order.Type)
+	log.Printf("  订单ID: %d 状态: %s", order.OrderID, order.Status)
+
+	// 交易成功后清除缓存
+	t.InvalidateAllCaches()
 
 	result := make(map[string]interface{})
 	result["orderId"] = order.OrderID
@@ -398,22 +680,103 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 		return nil, err
 	}
 
-	// 创建市价卖出订单（使用br ID）
-	order, err := t.client.NewCreateOrderService().
-		Symbol(symbol).
-		Side(futures.SideTypeSell).
-		PositionSide(futures.PositionSideTypeShort).
-		Type(futures.OrderTypeMarket).
-		Quantity(quantityStr).
-		NewClientOrderID(getBrOrderID()).
-		Do(context.Background())
+	// 根据订单策略创建订单
+	var order *futures.CreateOrderResponse
+	if t.orderStrategy == "market_only" {
+		// 纯市价单策略
+		log.Printf("📋 [%s] 使用市价单策略", symbol)
+		order, err = t.client.NewCreateOrderService().
+			Symbol(symbol).
+			Side(futures.SideTypeSell).
+			PositionSide(futures.PositionSideTypeShort).
+			Type(futures.OrderTypeMarket).
+			Quantity(quantityStr).
+			NewClientOrderID(getBrOrderID()).
+			Do(context.Background())
+	} else {
+		// 限价单策略（conservative_hybrid 或 limit_only）
+		currentPrice, priceErr := t.GetCurrentPrice(symbol)
+		if priceErr != nil {
+			return nil, fmt.Errorf("获取当前价格失败: %w", priceErr)
+		}
+
+		// 计算限价：空仓使用 currentPrice * (1 - offset)
+		// offset 为负数（如 -0.03），所以 (1 - (-0.03)) = 1.03，实际价格会高于市价
+		limitPrice := currentPrice * (1 - t.limitPriceOffset/100)
+		limitPriceStr, formatErr := t.FormatPrice(symbol, limitPrice)
+		if formatErr != nil {
+			return nil, fmt.Errorf("格式化限价失败: %w", formatErr)
+		}
+
+		log.Printf("📋 [%s] 使用限价单策略: 当前价 %.6f, 限价 %s (偏移 %.2f%%)",
+			symbol, currentPrice, limitPriceStr, t.limitPriceOffset)
+
+		order, err = t.client.NewCreateOrderService().
+			Symbol(symbol).
+			Side(futures.SideTypeSell).
+			PositionSide(futures.PositionSideTypeShort).
+			Type(futures.OrderTypeLimit).
+			Quantity(quantityStr).
+			Price(limitPriceStr).
+			TimeInForce(futures.TimeInForceTypeGTC). // Good Till Cancel
+			NewClientOrderID(getBrOrderID()).
+			Do(context.Background())
+
+		if err != nil {
+			log.Printf("⚠️ 限价单创建失败: %v", err)
+			// 如果是 conservative_hybrid 策略，失败后可以降级到市价单
+			if t.orderStrategy == "conservative_hybrid" {
+				log.Printf("📋 [%s] 限价单失败，降级为市价单", symbol)
+				order, err = t.client.NewCreateOrderService().
+					Symbol(symbol).
+					Side(futures.SideTypeSell).
+					PositionSide(futures.PositionSideTypeShort).
+					Type(futures.OrderTypeMarket).
+					Quantity(quantityStr).
+					NewClientOrderID(getBrOrderID()).
+					Do(context.Background())
+			}
+		} else {
+			// 限价单创建成功
+			log.Printf("✓ 限价单创建成功: %s OrderID=%d", symbol, order.OrderID)
+
+			// 如果是 conservative_hybrid 策略，启动监控并在超时时转换为市价单
+			if t.orderStrategy == "conservative_hybrid" {
+				result, converted, monitorErr := t.monitorAndConvertLimitOrder(
+					symbol,
+					order.OrderID,
+					futures.SideTypeSell,
+					futures.PositionSideTypeShort,
+					quantityStr,
+				)
+				if monitorErr != nil {
+					return nil, fmt.Errorf("监控限价单失败: %w", monitorErr)
+				}
+
+				if converted {
+					log.Printf("✓ 开空仓成功（限价单超时转市价单）: %s 数量: %s", symbol, quantityStr)
+				} else {
+					log.Printf("✓ 开空仓成功（限价单成交）: %s 数量: %s", symbol, quantityStr)
+				}
+				// 交易成功后清除缓存
+				t.InvalidateAllCaches()
+				return result, nil
+			}
+
+			// limit_only 策略：直接返回限价单结果，不监控
+			log.Printf("✓ 限价单已提交: %s 数量: %s (limit_only 模式，不自动转换)", symbol, quantityStr)
+		}
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("开空仓失败: %w", err)
 	}
 
-	log.Printf("✓ 开空仓成功: %s 数量: %s", symbol, quantityStr)
-	log.Printf("  订单ID: %d", order.OrderID)
+	log.Printf("✓ 开空仓成功: %s 数量: %s 类型: %s", symbol, quantityStr, order.Type)
+	log.Printf("  订单ID: %d 状态: %s", order.OrderID, order.Status)
+
+	// 交易成功后清除缓存
+	t.InvalidateAllCaches()
 
 	result := make(map[string]interface{})
 	result["orderId"] = order.OrderID
@@ -470,6 +833,9 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 		log.Printf("  ⚠ 取消挂单失败: %v", err)
 	}
 
+	// 交易成功后清除缓存
+	t.InvalidateAllCaches()
+
 	result := make(map[string]interface{})
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
@@ -524,6 +890,9 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 	if err := t.CancelAllOrders(symbol); err != nil {
 		log.Printf("  ⚠ 取消挂单失败: %v", err)
 	}
+
+	// 交易成功后清除缓存
+	t.InvalidateAllCaches()
 
 	result := make(map[string]interface{})
 	result["orderId"] = order.OrderID
@@ -754,6 +1123,9 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		return fmt.Errorf("设置止损失败: %w", err)
 	}
 
+	// 设置止损后清除持仓缓存（掛單會影響持倉信息）
+	t.InvalidatePositionsCache()
+
 	log.Printf("  止损价设置: %.4f", stopPrice)
 	return nil
 }
@@ -791,6 +1163,9 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 	if err != nil {
 		return fmt.Errorf("设置止盈失败: %w", err)
 	}
+
+	// 设置止盈后清除持仓缓存（掛單會影響持倉信息）
+	t.InvalidatePositionsCache()
 
 	log.Printf("  止盈价设置: %.4f", takeProfitPrice)
 	return nil
@@ -900,6 +1275,58 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 
 	format := fmt.Sprintf("%%.%df", precision)
 	return fmt.Sprintf(format, quantity), nil
+}
+
+// GetOpenOrders retrieves open orders for AI decision context
+func (t *FuturesTrader) GetOpenOrders(symbol string) ([]decision.OpenOrderInfo, error) {
+	// 使用 Binance SDK 查詢未成交訂單
+	service := t.client.NewListOpenOrdersService()
+	if symbol != "" {
+		service = service.Symbol(symbol)
+	}
+
+	orders, err := service.Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("獲取未成交訂單失敗: %w", err)
+	}
+
+	// 轉換為 decision.OpenOrderInfo 格式
+	result := make([]decision.OpenOrderInfo, 0, len(orders))
+	for _, order := range orders {
+		// 解析價格和數量（跳過無效數據）
+		price, err := strconv.ParseFloat(order.Price, 64)
+		if err != nil {
+			log.Printf("⚠️ 解析訂單價格失敗 (OrderID: %d): %v", order.OrderID, err)
+			continue
+		}
+
+		stopPrice, err := strconv.ParseFloat(order.StopPrice, 64)
+		if err != nil {
+			log.Printf("⚠️ 解析止損價失敗 (OrderID: %d): %v", order.OrderID, err)
+			stopPrice = 0 // 止損價可選，設置為0
+		}
+
+		quantity, err := strconv.ParseFloat(order.OrigQuantity, 64)
+		if err != nil {
+			log.Printf("⚠️ 解析訂單數量失敗 (OrderID: %d): %v", order.OrderID, err)
+			continue
+		}
+
+		orderInfo := decision.OpenOrderInfo{
+			Symbol:       order.Symbol,
+			OrderID:      order.OrderID,
+			Type:         string(order.Type),
+			Side:         string(order.Side),
+			PositionSide: string(order.PositionSide),
+			Quantity:     quantity,
+			Price:        price,
+			StopPrice:    stopPrice,
+		}
+		result = append(result, orderInfo)
+	}
+
+	log.Printf("✓ 查詢到 %d 個未成交訂單", len(result))
+	return result, nil
 }
 
 // 辅助函数

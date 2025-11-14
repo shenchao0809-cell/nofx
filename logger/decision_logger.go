@@ -14,6 +14,7 @@ import (
 type DecisionRecord struct {
 	Timestamp      time.Time          `json:"timestamp"`       // 决策时间
 	CycleNumber    int                `json:"cycle_number"`    // 周期编号
+	Exchange       string             `json:"exchange"`        // 交易所类型 (binance/hyperliquid/aster)
 	SystemPrompt   string             `json:"system_prompt"`   // 系统提示词（发送给AI的系统prompt）
 	InputPrompt    string             `json:"input_prompt"`    // 发送给AI的输入prompt
 	CoTTrace       string             `json:"cot_trace"`       // AI思维链（输出）
@@ -53,15 +54,18 @@ type PositionSnapshot struct {
 
 // DecisionAction 决策动作
 type DecisionAction struct {
-	Action    string    `json:"action"`    // open_long, open_short, close_long, close_short, update_stop_loss, update_take_profit, partial_close
-	Symbol    string    `json:"symbol"`    // 币种
-	Quantity  float64   `json:"quantity"`  // 数量（部分平仓时使用）
-	Leverage  int       `json:"leverage"`  // 杠杆（开仓时）
-	Price     float64   `json:"price"`     // 执行价格
-	OrderID   int64     `json:"order_id"`  // 订单ID
-	Timestamp time.Time `json:"timestamp"` // 执行时间
-	Success   bool      `json:"success"`   // 是否成功
-	Error     string    `json:"error"`     // 错误信息
+	Action      string    `json:"action"`                 // open_long, open_short, close_long, close_short, update_stop_loss, update_take_profit, partial_close
+	Symbol      string    `json:"symbol"`                 // 币种
+	Quantity    float64   `json:"quantity"`               // 数量（部分平仓时使用）
+	Leverage    int       `json:"leverage"`               // 杠杆（开仓时）
+	Price       float64   `json:"price"`                  // 执行价格
+	OrderID     int64     `json:"order_id"`               // 订单ID
+	Timestamp   time.Time `json:"timestamp"`              // 执行时间
+	Success     bool      `json:"success"`                // 是否成功
+	Error       string    `json:"error"`                  // 错误信息
+	Reason      string    `json:"reason,omitempty"`       // AI给出的原始理由
+	CloseReason string    `json:"close_reason,omitempty"` // take_profit / stop_loss / partial_close / manual
+	PnL         float64   `json:"pnl,omitempty"`          // 平仓前的未实现盈亏（用于识别止盈/止损）
 }
 
 // IDecisionLogger 决策日志记录器接口
@@ -340,6 +344,25 @@ type SymbolPerformance struct {
 	AvgPnL        float64 `json:"avg_pn_l"`       // 平均盈亏
 }
 
+// getTakerFeeRate 获取交易所的Taker费率
+// 基于公开信息：
+// - Aster: Maker 0.010%, Taker 0.035%
+// - Hyperliquid: Maker 0.015%, Taker 0.045%
+// - Binance Futures: Maker 0.020%, Taker 0.050% (默认费率)
+func getTakerFeeRate(exchange string) float64 {
+	switch exchange {
+	case "aster":
+		return 0.00035 // 0.035%
+	case "hyperliquid":
+		return 0.00045 // 0.045%
+	case "binance":
+		return 0.0005 // 0.050%
+	default:
+		// 对于未知交易所，使用保守估计（Binance费率）
+		return 0.0005
+	}
+}
+
 // AnalyzePerformance 分析最近N个周期的交易表现
 func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAnalysis, error) {
 	records, err := l.GetLatestRecords(lookbackCycles)
@@ -404,7 +427,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						"leverage":  action.Leverage,
 					}
 				case "close_long", "close_short", "auto_close_long", "auto_close_short":
-					// 移除已平仓记录
+					// Remove closed position records
 					delete(openPositions, posKey)
 					// partial_close 不處理，保留持倉記錄
 				}
@@ -479,13 +502,21 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						actualQuantity = action.Quantity
 					}
 
-					// 计算本次平仓的盈亏（USDT）
+					// 计算本次平仓的盈亏（USDT）- 包含手续费
 					var pnl float64
 					if side == "long" {
 						pnl = actualQuantity * (action.Price - openPrice)
 					} else {
 						pnl = actualQuantity * (openPrice - action.Price)
 					}
+
+					// ⚠️ 扣除交易手续费（开仓 + 平仓各一次）
+					// 获取交易所费率（从record中获取，如果没有则使用默认值）
+					feeRate := getTakerFeeRate(record.Exchange)
+					openFee := actualQuantity * openPrice * feeRate     // 开仓手续费
+					closeFee := actualQuantity * action.Price * feeRate // 平仓手续费
+					totalFees := openFee + closeFee
+					pnl -= totalFees // 从盈亏中扣除手续费
 
 					// 🔧 BUG FIX：處理 partial_close 聚合邏輯
 					if action.Action == "partial_close" {
@@ -528,7 +559,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 							}
 
 							analysis.RecentTrades = append(analysis.RecentTrades, outcome)
-							analysis.TotalTrades++ // 🔧 只在完全平倉時計數
+							analysis.TotalTrades++ // 🔧 Only count when fully closed
 
 							// 分类交易
 							if accumulatedPnL > 0 {

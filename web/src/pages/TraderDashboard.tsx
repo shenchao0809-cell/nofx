@@ -833,59 +833,115 @@ function DecisionCard({
       {/* Decisions Actions */}
       {decision.decisions && decision.decisions.length > 0 && (
         <div className="space-y-2 mb-3">
-          {decision.decisions.map((action, j) => (
-            <div
-              key={j}
-              className="flex items-center gap-2 text-sm rounded px-3 py-2"
-              style={{ background: '#0B0E11' }}
-            >
-              <span
-                className="font-mono font-bold"
-                style={{ color: '#EAECEF' }}
+          {decision.decisions.map((action, j) => {
+            const closeReasonLabel =
+              action.close_reason === 'take_profit'
+                ? language === 'zh'
+                  ? '止盈'
+                  : 'Take Profit'
+                : action.close_reason === 'stop_loss'
+                  ? language === 'zh'
+                    ? '止损'
+                    : 'Stop Loss'
+                  : action.close_reason === 'partial_close'
+                    ? language === 'zh'
+                      ? '部分平仓'
+                      : 'Partial Close'
+                    : action.close_reason === 'manual_close'
+                      ? language === 'zh'
+                        ? '手动平仓'
+                        : 'Manual Close'
+                      : undefined
+
+            const closeReasonStyle =
+              action.close_reason === 'take_profit'
+                ? { background: 'rgba(14,203,129,0.12)', color: '#0ECB81' }
+                : action.close_reason === 'stop_loss'
+                  ? { background: 'rgba(246,70,93,0.12)', color: '#F6465D' }
+                  : { background: 'rgba(132,142,156,0.12)', color: '#EAECEF' }
+
+            return (
+              <div
+                key={j}
+                className="rounded px-3 py-2 text-sm space-y-1"
+                style={{ background: '#0B0E11' }}
               >
-                {action.symbol}
-              </span>
-              <span
-                className="px-2 py-0.5 rounded text-xs font-bold"
-                style={
-                  action.action.includes('open')
-                    ? {
-                        background: 'rgba(96, 165, 250, 0.1)',
-                        color: '#60a5fa',
-                      }
-                    : {
-                        background: 'rgba(240, 185, 11, 0.1)',
-                        color: '#F0B90B',
-                      }
-                }
-              >
-                {action.action}
-              </span>
-              {action.leverage > 0 && (
-                <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>
-              )}
-              {action.price > 0 && (
-                <span
-                  className="font-mono text-xs"
-                  style={{ color: '#848E9C' }}
-                >
-                  @{action.price.toFixed(4)}
-                </span>
-              )}
-              <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
-                {action.success ? (
-                  <Check className="w-3 h-3 inline" />
-                ) : (
-                  <X className="w-3 h-3 inline" />
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    className="font-mono font-bold"
+                    style={{ color: '#EAECEF' }}
+                  >
+                    {action.symbol}
+                  </span>
+                  <span
+                    className="px-2 py-0.5 rounded text-xs font-bold"
+                    style={
+                      action.action.includes('open')
+                        ? {
+                            background: 'rgba(96, 165, 250, 0.1)',
+                            color: '#60a5fa',
+                          }
+                        : {
+                            background: 'rgba(240, 185, 11, 0.1)',
+                            color: '#F0B90B',
+                          }
+                    }
+                  >
+                    {action.action}
+                  </span>
+                  {action.leverage > 0 && (
+                    <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>
+                  )}
+                  {action.price > 0 && (
+                    <span
+                      className="font-mono text-xs"
+                      style={{ color: '#848E9C' }}
+                    >
+                      @{action.price.toFixed(4)}
+                    </span>
+                  )}
+                  {typeof action.pnl === 'number' && (
+                    <span
+                      className="font-mono text-xs"
+                      style={{
+                        color: action.pnl >= 0 ? '#0ECB81' : '#F6465D',
+                      }}
+                    >
+                      {action.pnl >= 0 ? '+' : ''}
+                      {action.pnl.toFixed(2)} USDT
+                    </span>
+                  )}
+                  {closeReasonLabel && (
+                    <span
+                      className="px-2 py-0.5 rounded text-xs font-semibold"
+                      style={closeReasonStyle}
+                    >
+                      {closeReasonLabel}
+                    </span>
+                  )}
+                  <span
+                    style={{ color: action.success ? '#0ECB81' : '#F6465D' }}
+                  >
+                    {action.success ? (
+                      <Check className="w-3 h-3 inline" />
+                    ) : (
+                      <X className="w-3 h-3 inline" />
+                    )}
+                  </span>
+                  {action.error && (
+                    <span className="text-xs ml-2" style={{ color: '#F6465D' }}>
+                      {action.error}
+                    </span>
+                  )}
+                </div>
+                {action.reason && (
+                  <div className="text-xs" style={{ color: '#848E9C' }}>
+                    {action.reason}
+                  </div>
                 )}
-              </span>
-              {action.error && (
-                <span className="text-xs ml-2" style={{ color: '#F6465D' }}>
-                  {action.error}
-                </span>
-              )}
-            </div>
-          ))}
+              </div>
+            )
+          })}
         </div>
       )}
 

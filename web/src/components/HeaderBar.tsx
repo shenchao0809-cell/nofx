@@ -100,7 +100,7 @@ export default function HeaderBar({
                       currentPage === 'competition'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -139,7 +139,7 @@ export default function HeaderBar({
                       currentPage === 'traders'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -178,7 +178,7 @@ export default function HeaderBar({
                       currentPage === 'trader'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -221,7 +221,7 @@ export default function HeaderBar({
                       currentPage === 'faq'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -249,6 +249,50 @@ export default function HeaderBar({
 
                   {t('faqNav', language)}
                 </button>
+
+                {/* Prompts Navigation Button */}
+                <button
+                  onClick={() => {
+                    if (onPageChange) {
+                      onPageChange('prompts')
+                    } else {
+                      navigate('/prompts')
+                    }
+                  }}
+                  className="text-sm font-bold transition-all duration-300 relative focus:outline-2 focus:outline-yellow-500"
+                  style={{
+                    color:
+                      currentPage === 'prompts'
+                        ? 'var(--brand-yellow)'
+                        : 'var(--brand-light-gray)',
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    position: 'relative',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (currentPage !== 'prompts') {
+                      e.currentTarget.style.color = 'var(--brand-yellow)'
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    if (currentPage !== 'prompts') {
+                      e.currentTarget.style.color = 'var(--brand-light-gray)'
+                    }
+                  }}
+                >
+                  {/* Background for selected state */}
+                  {currentPage === 'prompts' && (
+                    <span
+                      className="absolute inset-0 rounded-lg"
+                      style={{
+                        background: 'rgba(240, 185, 11, 0.15)',
+                        zIndex: -1,
+                      }}
+                    />
+                  )}
+
+                  {language === 'zh' ? '提示词' : 'Prompts'}
+                </button>
               </>
             ) : (
               // Landing page navigation when not logged in
@@ -261,7 +305,7 @@ export default function HeaderBar({
                       currentPage === 'competition'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -298,7 +342,7 @@ export default function HeaderBar({
                       currentPage === 'faq'
                         ? 'var(--brand-yellow)'
                         : 'var(--brand-light-gray)',
-                    padding: '8px 16px',
+                    padding: '6px 12px',
                     borderRadius: '8px',
                     position: 'relative',
                   }}
@@ -758,6 +802,42 @@ export default function HeaderBar({
                 )}
 
                 {t('faqNav', language)}
+              </button>
+
+              {/* Prompts Navigation Button - Mobile */}
+              <button
+                onClick={() => {
+                  if (onPageChange) {
+                    onPageChange('prompts')
+                  } else {
+                    navigate('/prompts')
+                  }
+                  setMobileMenuOpen(false)
+                }}
+                className="text-sm font-bold transition-all duration-300 relative focus:outline-2 focus:outline-yellow-500"
+                style={{
+                  color:
+                    currentPage === 'prompts'
+                      ? 'var(--brand-yellow)'
+                      : 'var(--brand-light-gray)',
+                  padding: '8px 16px',
+                  borderRadius: '8px',
+                  position: 'relative',
+                  textAlign: 'left',
+                }}
+              >
+                {/* Background for selected state */}
+                {currentPage === 'prompts' && (
+                  <span
+                    className="absolute inset-0 rounded-lg"
+                    style={{
+                      background: 'rgba(240, 185, 11, 0.15)',
+                      zIndex: -1,
+                    }}
+                  />
+                )}
+
+                {language === 'zh' ? '提示词' : 'Prompts'}
               </button>
             </>
           )}

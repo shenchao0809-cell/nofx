@@ -103,6 +103,9 @@ func (s *AutoTraderTestSuite) SetupTest() {
 		callCount:             0,
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
+		lastPositions:         make(map[string]decision.PositionInfo),
+		positionStopLoss:      make(map[string]float64),
+		positionTakeProfit:    make(map[string]float64),
 		stopMonitorCh:         make(chan struct{}),
 		peakPnLCache:          make(map[string]float64),
 		lastBalanceSyncTime:   time.Now(),
@@ -1084,6 +1087,10 @@ func (m *MockTrader) CancelStopOrders(symbol string) error {
 
 func (m *MockTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	return fmt.Sprintf("%.4f", quantity), nil
+}
+
+func (m *MockTrader) GetOpenOrders(symbol string) ([]decision.OpenOrderInfo, error) {
+	return []decision.OpenOrderInfo{}, nil
 }
 
 // ============================================================

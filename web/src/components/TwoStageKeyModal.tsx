@@ -77,7 +77,7 @@ export function TwoStageKeyModal({
   }, [isOpen, stage])
 
   const handleStage1Next = async () => {
-    // ✅ Normalize input (remove possible 0x prefix) before validating length
+    // ✅ Normalize input (remove potential 0x prefix) before validating length
     const normalized1 = part1.startsWith('0x') ? part1.slice(2) : part1
     if (normalized1.length < expectedPart1Length) {
       setError(
@@ -105,14 +105,14 @@ export function TwoStageKeyModal({
             ...obfuscationLog,
             `Stage 1: ${new Date().toISOString()} - Auto copied obfuscation`,
           ])
-          toast.success('已复制混淆字符串到剪贴板')
+          toast.success('Obfuscation string copied to clipboard')
         } catch {
           setClipboardStatus('failed')
           setObfuscationLog([
             ...obfuscationLog,
             `Stage 1: ${new Date().toISOString()} - Auto copy failed, manual required`,
           ])
-          toast.error('复制失败，请手动复制混淆字符串')
+          toast.error('Copy failed, please copy the obfuscation string manually')
         }
       } else {
         setClipboardStatus('failed')
@@ -120,7 +120,7 @@ export function TwoStageKeyModal({
           ...obfuscationLog,
           `Stage 1: ${new Date().toISOString()} - Clipboard API not available`,
         ])
-        toast('当前浏览器不支持自动复制，请手动复制')
+        toast('Browser does not support auto-copy, please copy manually')
       }
 
       setTimeout(() => {
@@ -134,7 +134,7 @@ export function TwoStageKeyModal({
   }
 
   const handleStage2Complete = () => {
-    // ✅ Normalize input (remove possible 0x prefix) before validating length
+    // ✅ Normalize input (remove potential 0x prefix) before validating length
     const normalized2 = part2.startsWith('0x') ? part2.slice(2) : part2
     if (normalized2.length < expectedPart2Length) {
       setError(
@@ -145,7 +145,7 @@ export function TwoStageKeyModal({
       return
     }
 
-    // ✅ Concatenate after removing 0x prefix from both parts
+    // ✅ Remove possible 0x prefix when concatenating
     const normalized1 = part1.startsWith('0x') ? part1.slice(2) : part1
     const fullKey = normalized1 + normalized2
     if (!validatePrivateKeyFormat(fullKey, expectedLength)) {
@@ -222,6 +222,12 @@ export function TwoStageKeyModal({
                   maxLength={expectedPart1Length + 2} // +2 for optional 0x prefix
                   disabled={processing}
                 />
+                <div className="text-gray-400 text-xs mt-1">
+                  {t('twoStageKey.helpText', language, {
+                    length: expectedPart1Length,
+                    totalWithPrefix: expectedPart1Length + 2,
+                  })}
+                </div>
               </div>
 
               {error && <div className="text-red-400 text-sm">{error}</div>}
@@ -296,6 +302,12 @@ export function TwoStageKeyModal({
                   className="w-full bg-gray-800 border border-gray-600 rounded-lg px-4 py-3 text-white font-mono text-sm focus:border-blue-500 focus:outline-none"
                   maxLength={expectedPart2Length + 2}
                 />
+                <div className="text-gray-400 text-xs mt-1">
+                  {t('twoStageKey.helpText', language, {
+                    length: expectedPart2Length,
+                    totalWithPrefix: expectedPart2Length + 2,
+                  })}
+                </div>
               </div>
 
               {error && <div className="text-red-400 text-sm">{error}</div>}

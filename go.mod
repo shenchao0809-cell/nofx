@@ -18,6 +18,7 @@ require (
 	github.com/sonirico/go-hyperliquid v0.17.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/crypto v0.42.0
+	golang.org/x/time v0.14.0
 	modernc.org/sqlite v1.40.0
 )
 

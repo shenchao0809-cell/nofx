@@ -113,24 +113,13 @@ func (tm *TraderManager) LoadTradersFromDatabase(database *config.Database) erro
 				break
 			}
 		}
-		// 如果没有精确匹配，尝试匹配 provider（兼容旧数据）
 		if aiModelCfg == nil {
-			for _, model := range aiModels {
-				if model.Provider == traderCfg.AIModelID {
-					aiModelCfg = model
-					log.Printf("⚠️  交易员 %s 使用旧版 provider 匹配: %s -> %s", traderCfg.Name, traderCfg.AIModelID, model.ID)
-					break
-				}
-			}
-		}
-
-		if aiModelCfg == nil {
-			log.Printf("⚠️  交易员 %s 的AI模型 %s 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("⚠️  交易员 %s 的AI模型 %d 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
 
 		if !aiModelCfg.Enabled {
-			log.Printf("⚠️  交易员 %s 的AI模型 %s 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("⚠️  交易员 %s 的AI模型 %d 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
 
@@ -150,12 +139,12 @@ func (tm *TraderManager) LoadTradersFromDatabase(database *config.Database) erro
 		}
 
 		if exchangeCfg == nil {
-			log.Printf("⚠️  交易员 %s 的交易所 %s 不存在，跳过", traderCfg.Name, traderCfg.ExchangeID)
+			log.Printf("⚠️  交易员 %s 的交易所 %d 不存在，跳过", traderCfg.Name, traderCfg.ExchangeID)
 			continue
 		}
 
 		if !exchangeCfg.Enabled {
-			log.Printf("⚠️  交易员 %s 的交易所 %s 未启用，跳过", traderCfg.Name, traderCfg.ExchangeID)
+			log.Printf("⚠️  交易员 %s 的交易所 %d 未启用，跳过", traderCfg.Name, traderCfg.ExchangeID)
 			continue
 		}
 
@@ -216,8 +205,8 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    traderCfg.ID,
 		Name:                  traderCfg.Name,
-		AIModel:               aiModelCfg.Provider, // 使用provider作为模型标识
-		Exchange:              exchangeCfg.ID,      // 使用exchange ID
+		AIModel:               aiModelCfg.Provider,    // 使用provider作为模型标识
+		Exchange:              exchangeCfg.ExchangeID, // 使用exchange ID
 		BinanceAPIKey:         "",
 		BinanceSecretKey:      "",
 		HyperliquidPrivateKey: "",
@@ -232,6 +221,8 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 		InitialBalance:        traderCfg.InitialBalance,
 		BTCETHLeverage:        traderCfg.BTCETHLeverage,
 		AltcoinLeverage:       traderCfg.AltcoinLeverage,
+		TakerFeeRate:          traderCfg.TakerFeeRate, // Taker fee rate from config
+		MakerFeeRate:          traderCfg.MakerFeeRate, // Maker fee rate from config
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
@@ -239,16 +230,19 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 		DefaultCoins:          defaultCoins,
 		TradingCoins:          tradingCoins,
 		SystemPromptTemplate:  traderCfg.SystemPromptTemplate, // 系统提示词模板
+		OrderStrategy:         traderCfg.OrderStrategy,        // 订单策略
+		LimitPriceOffset:      traderCfg.LimitPriceOffset,     // 限价偏移
+		LimitTimeoutSeconds:   traderCfg.LimitTimeoutSeconds,  // 限价超时
 	}
 
 	// 根据交易所类型设置API密钥
-	if exchangeCfg.ID == "binance" {
+	if exchangeCfg.ExchangeID == "binance" {
 		traderConfig.BinanceAPIKey = exchangeCfg.APIKey
 		traderConfig.BinanceSecretKey = exchangeCfg.SecretKey
-	} else if exchangeCfg.ID == "hyperliquid" {
+	} else if exchangeCfg.ExchangeID == "hyperliquid" {
 		traderConfig.HyperliquidPrivateKey = exchangeCfg.APIKey // hyperliquid用APIKey存储private key
 		traderConfig.HyperliquidWalletAddr = exchangeCfg.HyperliquidWalletAddr
-	} else if exchangeCfg.ID == "aster" {
+	} else if exchangeCfg.ExchangeID == "aster" {
 		traderConfig.AsterUser = exchangeCfg.AsterUser
 		traderConfig.AsterSigner = exchangeCfg.AsterSigner
 		traderConfig.AsterPrivateKey = exchangeCfg.AsterPrivateKey
@@ -279,7 +273,7 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	}
 
 	tm.traders[traderCfg.ID] = at
-	log.Printf("✓ Trader '%s' (%s + %s) 已加载到内存", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ID)
+	log.Printf("✓ Trader '%s' (%s + %s) 已加载到内存", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ExchangeID)
 	return nil
 }
 
@@ -323,8 +317,8 @@ func (tm *TraderManager) AddTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    traderCfg.ID,
 		Name:                  traderCfg.Name,
-		AIModel:               aiModelCfg.Provider, // 使用provider作为模型标识
-		Exchange:              exchangeCfg.ID,      // 使用exchange ID
+		AIModel:               aiModelCfg.Provider,    // 使用provider作为模型标识
+		Exchange:              exchangeCfg.ExchangeID, // 使用exchange ID
 		BinanceAPIKey:         "",
 		BinanceSecretKey:      "",
 		HyperliquidPrivateKey: "",
@@ -339,22 +333,28 @@ func (tm *TraderManager) AddTraderFromDB(traderCfg *config.TraderRecord, aiModel
 		InitialBalance:        traderCfg.InitialBalance,
 		BTCETHLeverage:        traderCfg.BTCETHLeverage,
 		AltcoinLeverage:       traderCfg.AltcoinLeverage,
+		TakerFeeRate:          traderCfg.TakerFeeRate, // Taker fee rate from config
+		MakerFeeRate:          traderCfg.MakerFeeRate, // Maker fee rate from config
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
 		IsCrossMargin:         traderCfg.IsCrossMargin,
 		DefaultCoins:          defaultCoins,
 		TradingCoins:          tradingCoins,
+		SystemPromptTemplate:  traderCfg.SystemPromptTemplate, // 系统提示词模板
+		OrderStrategy:         traderCfg.OrderStrategy,        // 订单策略
+		LimitPriceOffset:      traderCfg.LimitPriceOffset,     // 限价偏移
+		LimitTimeoutSeconds:   traderCfg.LimitTimeoutSeconds,  // 限价超时
 	}
 
 	// 根据交易所类型设置API密钥
-	if exchangeCfg.ID == "binance" {
+	if exchangeCfg.ExchangeID == "binance" {
 		traderConfig.BinanceAPIKey = exchangeCfg.APIKey
 		traderConfig.BinanceSecretKey = exchangeCfg.SecretKey
-	} else if exchangeCfg.ID == "hyperliquid" {
+	} else if exchangeCfg.ExchangeID == "hyperliquid" {
 		traderConfig.HyperliquidPrivateKey = exchangeCfg.APIKey // hyperliquid用APIKey存储private key
 		traderConfig.HyperliquidWalletAddr = exchangeCfg.HyperliquidWalletAddr
-	} else if exchangeCfg.ID == "aster" {
+	} else if exchangeCfg.ExchangeID == "aster" {
 		traderConfig.AsterUser = exchangeCfg.AsterUser
 		traderConfig.AsterSigner = exchangeCfg.AsterSigner
 		traderConfig.AsterPrivateKey = exchangeCfg.AsterPrivateKey
@@ -385,7 +385,7 @@ func (tm *TraderManager) AddTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	}
 
 	tm.traders[traderCfg.ID] = at
-	log.Printf("✓ Trader '%s' (%s + %s) 已添加", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ID)
+	log.Printf("✓ Trader '%s' (%s + %s) 已添加", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ExchangeID)
 	return nil
 }
 
@@ -425,6 +425,50 @@ func (tm *TraderManager) GetTraderIDs() []string {
 	return ids
 }
 
+// RemoveTrader 从内存中移除交易员（删除前必须先停止）
+func (tm *TraderManager) RemoveTrader(traderID string) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	trader, exists := tm.traders[traderID]
+	if !exists {
+		return fmt.Errorf("trader ID '%s' 不存在", traderID)
+	}
+
+	// 确保交易员已停止（檢查 nil 避免測試時 panic）
+	if trader != nil {
+		status := trader.GetStatus()
+		if status != nil {
+			if isRunning, ok := status["is_running"].(bool); ok && isRunning {
+				log.Printf("⚠️ 交易员 %s 仍在运行，正在停止...", traderID)
+				trader.Stop()
+
+				// 等待停止（最多5秒）
+				for i := 0; i < 50; i++ {
+					time.Sleep(100 * time.Millisecond)
+					status := trader.GetStatus()
+					if running, ok := status["is_running"].(bool); !ok || !running {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 从map中删除
+	delete(tm.traders, traderID)
+	log.Printf("✅ 已从内存中移除交易员: %s", traderID)
+
+	// 清除竞赛缓存，强制下次重新计算
+	tm.competitionCache.mu.Lock()
+	tm.competitionCache.data = nil
+	tm.competitionCache.timestamp = time.Time{}
+	tm.competitionCache.mu.Unlock()
+	log.Printf("🔄 已清除竞赛缓存")
+
+	return nil
+}
+
 // StartAll 启动所有trader
 func (tm *TraderManager) StartAll() {
 	tm.mu.RLock()
@@ -439,6 +483,54 @@ func (tm *TraderManager) StartAll() {
 			}
 		}(id, t)
 	}
+}
+
+// StartRunningTraders 只启动数据库中标记为运行状态的交易员
+func (tm *TraderManager) StartRunningTraders(database *config.Database) error {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	// 获取所有用户
+	userIDs, err := database.GetAllUsers()
+	if err != nil {
+		return fmt.Errorf("获取用户列表失败: %w", err)
+	}
+
+	// 收集所有应该启动的交易员
+	var runningTraders []*config.TraderRecord
+	for _, userID := range userIDs {
+		traders, err := database.GetTraders(userID)
+		if err != nil {
+			log.Printf("⚠️ 获取用户 %s 的交易员失败: %v", userID, err)
+			continue
+		}
+		for _, trader := range traders {
+			if trader.IsRunning {
+				runningTraders = append(runningTraders, trader)
+			}
+		}
+	}
+
+	if len(runningTraders) == 0 {
+		log.Println("📋 没有需要自动启动的交易员")
+		return nil
+	}
+
+	log.Printf("🚀 自动启动 %d 个标记为运行状态的交易员...", len(runningTraders))
+	for _, traderCfg := range runningTraders {
+		if t, exists := tm.traders[traderCfg.ID]; exists {
+			go func(at *trader.AutoTrader, name string) {
+				log.Printf("▶️  启动 %s...", name)
+				if err := at.Run(); err != nil {
+					log.Printf("❌ %s 运行错误: %v", name, err)
+				}
+			}(t, traderCfg.Name)
+		} else {
+			log.Printf("⚠️  交易员 %s (ID: %s) 未加载到内存，跳过", traderCfg.Name, traderCfg.ID)
+		}
+	}
+
+	return nil
 }
 
 // StopAll 停止所有trader
@@ -797,24 +889,13 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 				break
 			}
 		}
-		// 如果没有精确匹配，尝试匹配 provider（兼容旧数据）
 		if aiModelCfg == nil {
-			for _, model := range aiModels {
-				if model.Provider == traderCfg.AIModelID {
-					aiModelCfg = model
-					log.Printf("⚠️  交易员 %s 使用旧版 provider 匹配: %s -> %s", traderCfg.Name, traderCfg.AIModelID, model.ID)
-					break
-				}
-			}
-		}
-
-		if aiModelCfg == nil {
-			log.Printf("⚠️ 交易员 %s 的AI模型 %s 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("⚠️ 交易员 %s 的AI模型 %d 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
 
 		if !aiModelCfg.Enabled {
-			log.Printf("⚠️ 交易员 %s 的AI模型 %s 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("⚠️ 交易员 %s 的AI模型 %d 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
 
@@ -828,12 +909,12 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 		}
 
 		if exchangeCfg == nil {
-			log.Printf("⚠️ 交易员 %s 的交易所 %s 不存在，跳过", traderCfg.Name, traderCfg.ExchangeID)
+			log.Printf("⚠️ 交易员 %s 的交易所 %d 不存在，跳过", traderCfg.Name, traderCfg.ExchangeID)
 			continue
 		}
 
 		if !exchangeCfg.Enabled {
-			log.Printf("⚠️ 交易员 %s 的交易所 %s 未启用，跳过", traderCfg.Name, traderCfg.ExchangeID)
+			log.Printf("⚠️ 交易员 %s 的交易所 %d 未启用，跳过", traderCfg.Name, traderCfg.ExchangeID)
 			continue
 		}
 
@@ -898,23 +979,12 @@ func (tm *TraderManager) LoadTraderByID(database *config.Database, userID, trade
 			break
 		}
 	}
-	// 如果没有精确匹配，尝试匹配 provider（兼容旧数据）
 	if aiModelCfg == nil {
-		for _, model := range aiModels {
-			if model.Provider == traderCfg.AIModelID {
-				aiModelCfg = model
-				log.Printf("⚠️ 交易员 %s 使用旧版 provider 匹配: %s -> %s", traderCfg.Name, traderCfg.AIModelID, model.ID)
-				break
-			}
-		}
-	}
-
-	if aiModelCfg == nil {
-		return fmt.Errorf("AI模型 %s 不存在", traderCfg.AIModelID)
+		return fmt.Errorf("AI模型 %d 不存在", traderCfg.AIModelID)
 	}
 
 	if !aiModelCfg.Enabled {
-		return fmt.Errorf("AI模型 %s 未启用", traderCfg.AIModelID)
+		return fmt.Errorf("AI模型 %d 未启用", traderCfg.AIModelID)
 	}
 
 	// 4. 查询交易所配置
@@ -932,11 +1002,11 @@ func (tm *TraderManager) LoadTraderByID(database *config.Database, userID, trade
 	}
 
 	if exchangeCfg == nil {
-		return fmt.Errorf("交易所 %s 不存在", traderCfg.ExchangeID)
+		return fmt.Errorf("交易所 %d 不存在", traderCfg.ExchangeID)
 	}
 
 	if !exchangeCfg.Enabled {
-		return fmt.Errorf("交易所 %s 未启用", traderCfg.ExchangeID)
+		return fmt.Errorf("交易所 %d 未启用", traderCfg.ExchangeID)
 	}
 
 	// 5. 查询系统配置
@@ -1028,11 +1098,13 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 	traderConfig := trader.AutoTraderConfig{
 		ID:                   traderCfg.ID,
 		Name:                 traderCfg.Name,
-		AIModel:              aiModelCfg.Provider, // 使用provider作为模型标识
-		Exchange:             exchangeCfg.ID,      // 使用exchange ID
+		AIModel:              aiModelCfg.Provider,    // 使用provider作为模型标识
+		Exchange:             exchangeCfg.ExchangeID, // 使用exchange ID
 		InitialBalance:       traderCfg.InitialBalance,
 		BTCETHLeverage:       traderCfg.BTCETHLeverage,
 		AltcoinLeverage:      traderCfg.AltcoinLeverage,
+		TakerFeeRate:         traderCfg.TakerFeeRate, // Taker fee rate from config
+		MakerFeeRate:         traderCfg.MakerFeeRate, // Maker fee rate from config
 		ScanInterval:         time.Duration(traderCfg.ScanIntervalMinutes) * time.Minute,
 		CoinPoolAPIURL:       effectiveCoinPoolURL,
 		CustomAPIURL:         aiModelCfg.CustomAPIURL,    // 自定义API URL
@@ -1045,17 +1117,20 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 		DefaultCoins:         defaultCoins,
 		TradingCoins:         tradingCoins,
 		SystemPromptTemplate: traderCfg.SystemPromptTemplate, // 系统提示词模板
+		OrderStrategy:        traderCfg.OrderStrategy,        // 订单策略
+		LimitPriceOffset:     traderCfg.LimitPriceOffset,     // 限价偏移
+		LimitTimeoutSeconds:  traderCfg.LimitTimeoutSeconds,  // 限价超时
 		HyperliquidTestnet:   exchangeCfg.Testnet,            // Hyperliquid测试网
 	}
 
 	// 根据交易所类型设置API密钥
-	if exchangeCfg.ID == "binance" {
+	if exchangeCfg.ExchangeID == "binance" {
 		traderConfig.BinanceAPIKey = exchangeCfg.APIKey
 		traderConfig.BinanceSecretKey = exchangeCfg.SecretKey
-	} else if exchangeCfg.ID == "hyperliquid" {
+	} else if exchangeCfg.ExchangeID == "hyperliquid" {
 		traderConfig.HyperliquidPrivateKey = exchangeCfg.APIKey // hyperliquid用APIKey存储private key
 		traderConfig.HyperliquidWalletAddr = exchangeCfg.HyperliquidWalletAddr
-	} else if exchangeCfg.ID == "aster" {
+	} else if exchangeCfg.ExchangeID == "aster" {
 		traderConfig.AsterUser = exchangeCfg.AsterUser
 		traderConfig.AsterSigner = exchangeCfg.AsterSigner
 		traderConfig.AsterPrivateKey = exchangeCfg.AsterPrivateKey
@@ -1086,18 +1161,6 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 	}
 
 	tm.traders[traderCfg.ID] = at
-	log.Printf("✓ Trader '%s' (%s + %s) 已为用户加载到内存", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ID)
+	log.Printf("✓ Trader '%s' (%s + %s) 已为用户加载到内存", traderCfg.Name, aiModelCfg.Provider, exchangeCfg.ExchangeID)
 	return nil
-}
-
-// RemoveTrader 从内存中移除指定的trader（不影响数据库）
-// 用于更新trader配置时强制重新加载
-func (tm *TraderManager) RemoveTrader(traderID string) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	if _, exists := tm.traders[traderID]; exists {
-		delete(tm.traders, traderID)
-		log.Printf("✓ Trader %s 已从内存中移除", traderID)
-	}
 }

@@ -1,6 +1,9 @@
 package market
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Data 市场数据结构
 type Data struct {
@@ -13,17 +16,29 @@ type Data struct {
 	CurrentRSI7       float64
 	OpenInterest      *OIData
 	FundingRate       float64
-	IntradaySeries    *IntradayData
-	LongerTermContext *LongerTermData
+	IntradaySeries    *IntradayData   // 3分钟数据 - 实时价格
+	MidTermSeries15m  *MidTermData15m // 15分钟数据 - 短期趋势
+	MidTermSeries1h   *MidTermData1h  // 1小时数据 - 中期趋势
+	LongerTermContext *LongerTermData // 4小时数据 - 长期趋势
+	DailyContext      *DailyData      // 日线数据 - 长期趋势和极端位置判断
 }
 
 // OIData Open Interest数据
 type OIData struct {
-	Latest  float64
-	Average float64
+	Latest       float64      // 当前持仓量
+	Average      float64      // 平均持仓量
+	Change4h     float64      // 4小时变化率（百分比），P0修复：用于AI验证"近4小时上升>+3%"
+	ActualPeriod string       // P0修复：实际使用的时间段（例如 "4h", "2.5h", "N/A"）
+	Historical   []OISnapshot // 历史数据（用于计算变化率）
 }
 
-// IntradayData 日内数据(3分钟间隔)
+// OISnapshot OI历史快照
+type OISnapshot struct {
+	Value     float64   // OI值
+	Timestamp time.Time // 时间戳
+}
+
+// IntradayData 日内数据(3分钟间隔) - 主要用于获取实时价格
 type IntradayData struct {
 	MidPrices   []float64
 	EMA20Values []float64
@@ -32,6 +47,24 @@ type IntradayData struct {
 	RSI14Values []float64
 	Volume      []float64
 	ATR14       float64
+}
+
+// MidTermData15m 15分钟时间框架数据 - 短期趋势过滤
+type MidTermData15m struct {
+	MidPrices   []float64
+	EMA20Values []float64
+	MACDValues  []float64
+	RSI7Values  []float64
+	RSI14Values []float64
+}
+
+// MidTermData1h 1小时时间框架数据 - 中期趋势确认
+type MidTermData1h struct {
+	MidPrices   []float64
+	EMA20Values []float64
+	MACDValues  []float64
+	RSI7Values  []float64
+	RSI14Values []float64
 }
 
 // LongerTermData 长期数据(4小时时间框架)
@@ -44,6 +77,17 @@ type LongerTermData struct {
 	AverageVolume float64
 	MACDValues    []float64
 	RSI14Values   []float64
+}
+
+// DailyData 日线数据 - 用于长期趋势判断和极端位置识别
+type DailyData struct {
+	MidPrices   []float64 // 日线收盘价序列
+	EMA20Values []float64 // EMA20序列
+	EMA50Values []float64 // EMA50序列
+	MACDValues  []float64 // MACD序列
+	RSI14Values []float64 // RSI14序列
+	ATR14Values []float64 // ATR14序列（波动率）
+	Volume      []float64 // 成交量序列
 }
 
 // Binance API 响应结构
@@ -77,9 +121,27 @@ type Kline struct {
 
 type KlineResponse []interface{}
 
+// BinanceErrorResponse represents Binance API error response
+type BinanceErrorResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+// Error implements error interface
+func (e *BinanceErrorResponse) Error() string {
+	return fmt.Sprintf("Binance API error (code %d): %s", e.Code, e.Msg)
+}
+
 type PriceTicker struct {
 	Symbol string `json:"symbol"`
 	Price  string `json:"price"`
+}
+
+type Ticker struct {
+	Symbol    string  `json:"symbol"`
+	LastPrice float64 `json:"lastPrice"`
+	Volume    float64 `json:"volume,omitempty"`
+	Timestamp int64   `json:"timestamp,omitempty"`
 }
 
 type Ticker24hr struct {
