@@ -301,6 +301,7 @@ export function TraderConfigModal({
         taker_fee_rate: formData.taker_fee_rate,  // 添加 Taker 费率
         maker_fee_rate: formData.maker_fee_rate,  // 添加 Maker 费率
         timeframes: formData.timeframes,          // 添加时间线选择
+        order_strategy: formData.order_strategy,  // 添加订单策略
       }
 
       // 只在编辑模式时包含initial_balance（用于手动更新）
