@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import PromptManagementPage from '../PromptManagementPage'
+import { httpClient } from '../../lib/httpClient'
 
 // Mock toast
 vi.mock('sonner', () => ({
@@ -10,21 +11,39 @@ vi.mock('sonner', () => ({
   },
 }))
 
-// Mock fetch globally
-global.fetch = vi.fn() as any
+// Mock httpClient
+vi.mock('../../lib/httpClient', () => ({
+  httpClient: {
+    get: vi.fn(),
+    post: vi.fn(),
+    put: vi.fn(),
+    delete: vi.fn(),
+  },
+}))
+
+// Mock localStorage
+const mockLocalStorage = {
+  getItem: vi.fn(() => 'mock-token'),
+  setItem: vi.fn(),
+  removeItem: vi.fn(),
+  clear: vi.fn(),
+}
+Object.defineProperty(window, 'localStorage', {
+  value: mockLocalStorage,
+})
 
 describe('PromptManagementPage', () => {
   beforeEach(() => {
-    // Reset fetch mock
+    // Reset all mocks
     vi.clearAllMocks()
   })
 
   it('should handle empty template list gracefully', async () => {
     // Mock API to return empty templates
-    ;(global.fetch as any).mockResolvedValueOnce({
+    vi.mocked(httpClient.get).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ templates: [] }),
-    })
+    } as Response)
 
     render(<PromptManagementPage />)
 
@@ -35,7 +54,7 @@ describe('PromptManagementPage', () => {
 
   it('should handle API error gracefully', async () => {
     // Mock API to fail
-    ;(global.fetch as any).mockRejectedValueOnce(new Error('Network error'))
+    vi.mocked(httpClient.get).mockRejectedValueOnce(new Error('Network error'))
 
     render(<PromptManagementPage />)
 
@@ -57,10 +76,10 @@ describe('PromptManagementPage', () => {
     const mockContent = '# 测试模板\n\n这是测试内容'
 
     // Mock template list API
-    ;(global.fetch as any).mockResolvedValueOnce({
+    vi.mocked(httpClient.get).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ templates: mockTemplates }),
-    })
+    } as Response)
 
     render(<PromptManagementPage />)
 
@@ -69,10 +88,10 @@ describe('PromptManagementPage', () => {
     })
 
     // Mock template content API
-    ;(global.fetch as any).mockResolvedValueOnce({
+    vi.mocked(httpClient.get).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: mockContent }),
-    })
+    } as Response)
 
     // Click on template
     const templateButton = screen.getByText('测试模板')
@@ -93,10 +112,10 @@ describe('PromptManagementPage', () => {
     ]
 
     // Mock template list API
-    ;(global.fetch as any).mockResolvedValueOnce({
+    vi.mocked(httpClient.get).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ templates: mockTemplates }),
-    })
+    } as Response)
 
     render(<PromptManagementPage />)
 
@@ -105,10 +124,10 @@ describe('PromptManagementPage', () => {
     })
 
     // Mock template content API to return undefined content
-    ;(global.fetch as any).mockResolvedValueOnce({
+    vi.mocked(httpClient.get).mockResolvedValueOnce({
       ok: true,
       json: async () => ({ content: undefined }),
-    })
+    } as Response)
 
     // Click on template
     const templateButton = screen.getByText('测试模板')
@@ -135,15 +154,15 @@ describe('PromptManagementPage', () => {
     const mockContent = 'Line 1\nLine 2\nLine 3'
 
     // Mock APIs
-    ;(global.fetch as any)
+    vi.mocked(httpClient.get)
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ templates: mockTemplates }),
-      })
+      } as Response)
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ content: mockContent }),
-      })
+      } as Response)
 
     render(<PromptManagementPage />)
 

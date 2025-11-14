@@ -1,11 +1,26 @@
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { httpClient } from '../lib/httpClient'
 
 interface PromptTemplate {
   name: string
   content: string
   display_name?: { [key: string]: string }
   description?: { [key: string]: string }
+}
+
+// Helper function to get auth headers
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem('auth_token')
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  return headers
 }
 
 export default function PromptManagementPage() {
@@ -19,7 +34,7 @@ export default function PromptManagementPage() {
   // 加载模板列表
   const loadTemplates = async () => {
     try {
-      const response = await fetch('/api/prompt-templates')
+      const response = await httpClient.get('/api/prompt-templates', getAuthHeaders())
       const data = await response.json()
       setTemplates(data.templates || [])
     } catch (error) {
@@ -38,7 +53,7 @@ export default function PromptManagementPage() {
 
     // 获取完整的模板内容
     try {
-      const response = await fetch(`/api/prompt-templates/${template.name}`)
+      const response = await httpClient.get(`/api/prompt-templates/${template.name}`, getAuthHeaders())
       if (response.ok) {
         const data = await response.json()
         setEditContent(data.content || '')
@@ -58,11 +73,11 @@ export default function PromptManagementPage() {
     if (!selectedTemplate) return
 
     try {
-      const response = await fetch(`/api/prompt-templates/${selectedTemplate.name}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: editContent }),
-      })
+      const response = await httpClient.put(
+        `/api/prompt-templates/${selectedTemplate.name}`,
+        { content: editContent },
+        getAuthHeaders()
+      )
 
       if (response.ok) {
         toast.success('保存成功')
@@ -85,14 +100,14 @@ export default function PromptManagementPage() {
     }
 
     try {
-      const response = await fetch('/api/prompt-templates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const response = await httpClient.post(
+        '/api/prompt-templates',
+        {
           name: newTemplateName,
           content: '# 新模板\n\n请输入您的提示词内容...',
-        }),
-      })
+        },
+        getAuthHeaders()
+      )
 
       if (response.ok) {
         toast.success('创建成功')
@@ -114,9 +129,10 @@ export default function PromptManagementPage() {
     if (!selectedTemplate) return
 
     try {
-      const response = await fetch(`/api/prompt-templates/${selectedTemplate.name}`, {
-        method: 'DELETE',
-      })
+      const response = await httpClient.delete(
+        `/api/prompt-templates/${selectedTemplate.name}`,
+        getAuthHeaders()
+      )
 
       if (response.ok) {
         toast.success('删除成功')
