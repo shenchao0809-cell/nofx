@@ -64,10 +64,10 @@ func TestNew(t *testing.T) {
 		defer os.Unsetenv("AI_MAX_TOKENS")
 
 		aiClient := New()
-	client, ok := aiClient.(*Client)
-	if !ok {
-		t.Fatal("expected *Client type")
-	}
+		client, ok := aiClient.(*Client)
+		if !ok {
+			t.Fatal("expected *Client type")
+		}
 
 		// Should use default value
 		if client.MaxTokens != 2000 {

@@ -510,7 +510,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 					// ⚠️ 扣除交易手续费（开仓 + 平仓各一次）
 					// 获取交易所费率（从record中获取，如果没有则使用默认值）
 					feeRate := getTakerFeeRate(record.Exchange)
-					openFee := actualQuantity * openPrice * feeRate   // 开仓手续费
+					openFee := actualQuantity * openPrice * feeRate     // 开仓手续费
 					closeFee := actualQuantity * action.Price * feeRate // 平仓手续费
 					totalFees := openFee + closeFee
 					pnl -= totalFees // 从盈亏中扣除手续费

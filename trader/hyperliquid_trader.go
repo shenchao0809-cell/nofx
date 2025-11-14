@@ -906,11 +906,10 @@ func absFloat(x float64) float64 {
 	return x
 }
 
-// GetOpenOrders 获取未成交订单（用于 AI 决策上下文）
-// TODO: 实现 Hyperliquid 的未成交订单获取逻辑
-// 当前返回空列表，需要调用 Hyperliquid API /info endpoint with type="openOrders"
+// GetOpenOrders retrieves open orders for AI decision context
+// TODO: Implement Hyperliquid /info endpoint with type="openOrders" API call
 func (t *HyperliquidTrader) GetOpenOrders(symbol string) ([]decision.OpenOrderInfo, error) {
-	// 暂时返回空列表，避免阻塞主流程
-	// 后续需要实现完整的 Hyperliquid open orders API 调用
+	// Return empty list for now to avoid blocking main flow
+	// TODO: Implement full Hyperliquid open orders API integration
 	return []decision.OpenOrderInfo{}, nil
 }

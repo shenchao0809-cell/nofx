@@ -46,16 +46,16 @@ type PositionInfo struct {
 	TakeProfit       float64 `json:"take_profit,omitempty"` // 止盈价格（用于推断平仓原因）
 }
 
-// OpenOrderInfo 未成交订单信息（用于 AI 决策时了解当前挂单状态）
+// OpenOrderInfo represents an open order for AI decision context
 type OpenOrderInfo struct {
-	Symbol       string  `json:"symbol"`        // 交易对
-	OrderID      int64   `json:"order_id"`      // 订单ID
-	Type         string  `json:"type"`          // 订单类型: STOP_MARKET, TAKE_PROFIT_MARKET, LIMIT, MARKET
-	Side         string  `json:"side"`          // 订单方向: BUY, SELL
-	PositionSide string  `json:"position_side"` // 持仓方向: LONG, SHORT, BOTH
-	Quantity     float64 `json:"quantity"`      // 订单数量
-	Price        float64 `json:"price"`         // 限价订单价格（限价单）
-	StopPrice    float64 `json:"stop_price"`    // 触发价格（止损/止盈单）
+	Symbol       string  `json:"symbol"`        // Trading pair
+	OrderID      int64   `json:"order_id"`      // Order ID
+	Type         string  `json:"type"`          // Order type: STOP_MARKET, TAKE_PROFIT_MARKET, LIMIT, MARKET
+	Side         string  `json:"side"`          // Order side: BUY, SELL
+	PositionSide string  `json:"position_side"` // Position side: LONG, SHORT, BOTH
+	Quantity     float64 `json:"quantity"`      // Order quantity
+	Price        float64 `json:"price"`         // Limit order price (for limit orders)
+	StopPrice    float64 `json:"stop_price"`    // Trigger price (for stop-loss/take-profit orders)
 }
 
 // AccountInfo 账户信息
@@ -93,7 +93,7 @@ type Context struct {
 	CallCount       int                     `json:"call_count"`
 	Account         AccountInfo             `json:"account"`
 	Positions       []PositionInfo          `json:"positions"`
-	OpenOrders      []OpenOrderInfo         `json:"open_orders"` // 未成交订单列表（用于 AI 了解挂单状态）
+	OpenOrders      []OpenOrderInfo         `json:"open_orders"` // List of open orders for AI context
 	CandidateCoins  []CandidateCoin         `json:"candidate_coins"`
 	MarketDataMap   map[string]*market.Data `json:"-"` // 不序列化，但内部使用
 	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
@@ -465,7 +465,7 @@ func buildUserPrompt(ctx *Context) string {
 				pos.EntryPrice, pos.MarkPrice, pos.Quantity, positionValue, pos.UnrealizedPnLPct, pos.UnrealizedPnL, pos.PeakPnLPct,
 				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
 
-			// 显示该持仓的止损/止盈挂单状态（用于 AI 了解已有挂单，避免重复下单）
+			// Display stop-loss/take-profit orders for this position to prevent duplicate orders
 			hasStopLoss := false
 
 			for _, order := range ctx.OpenOrders {

@@ -53,7 +53,7 @@ type Trader interface {
 	// FormatQuantity 格式化数量到正确的精度
 	FormatQuantity(symbol string, quantity float64) (string, error)
 
-	// GetOpenOrders 获取未成交订单（用于 AI 决策上下文）
-	// symbol 为空时返回所有交易对的订单，否则只返回指定交易对的订单
+	// GetOpenOrders retrieves open orders for AI decision context
+	// Returns all orders if symbol is empty, otherwise returns orders for the specified symbol
 	GetOpenOrders(symbol string) ([]decision.OpenOrderInfo, error)
 }

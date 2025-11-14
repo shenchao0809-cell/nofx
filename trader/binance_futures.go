@@ -1231,12 +1231,11 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 	return fmt.Sprintf(format, quantity), nil
 }
 
-// GetOpenOrders 获取未成交订单（用于 AI 决策上下文）
-// TODO: 实现 Binance Futures 的未成交订单获取逻辑
-// 当前返回空列表，需要调用 Binance API /fapi/v1/openOrders
+// GetOpenOrders retrieves open orders for AI decision context
+// TODO: Implement Binance Futures /fapi/v1/openOrders API call
 func (t *FuturesTrader) GetOpenOrders(symbol string) ([]decision.OpenOrderInfo, error) {
-	// 暂时返回空列表，避免阻塞主流程
-	// 后续需要实现完整的 Binance Futures open orders API 调用
+	// Return empty list for now to avoid blocking main flow
+	// TODO: Implement full Binance Futures open orders API integration
 	return []decision.OpenOrderInfo{}, nil
 }
 
