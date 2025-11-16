@@ -36,6 +36,9 @@ config.db*
 nofx.db
 configbak.json
 
+# 部署状态文件（包含敏感信息）
+DEPLOYMENT_STATUS.md
+
 # 决策日志
 decision_logs/
 coin_pool_cache/
