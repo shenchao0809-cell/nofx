@@ -177,10 +177,32 @@ func parseKline(kr KlineResponse) (Kline, error) {
 }
 
 func (c *APIClient) GetCurrentPrice(symbol string) (float64, error) {
+	const maxRetries = 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		price, err := c.getCurrentPriceAttempt(symbol, attempt)
+		if err == nil {
+			return price, nil
+		}
+
+		lastErr = err
+		if attempt < maxRetries {
+			backoff := time.Duration(attempt) * 500 * time.Millisecond
+			log.Printf("⚠️ GetCurrentPrice attempt %d/%d failed for %s: %v, retrying in %v...",
+				attempt, maxRetries, symbol, err, backoff)
+			time.Sleep(backoff)
+		}
+	}
+
+	return 0, fmt.Errorf("failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+func (c *APIClient) getCurrentPriceAttempt(symbol string, attempt int) (float64, error) {
 	url := fmt.Sprintf("%s/fapi/v1/ticker/price", baseURL)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("create request failed: %w", err)
 	}
 
 	q := req.URL.Query()
@@ -189,24 +211,34 @@ func (c *APIClient) GetCurrentPrice(symbol string) (float64, error) {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("read response body failed: %w", err)
+	}
+
+	// Check HTTP status code
+	if resp.StatusCode != http.StatusOK {
+		var binanceErr BinanceErrorResponse
+		if json.Unmarshal(body, &binanceErr) == nil && binanceErr.Code != 0 {
+			log.Printf("❌ Binance API error for %s (attempt %d): %v", symbol, attempt, &binanceErr)
+			return 0, &binanceErr
+		}
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	var ticker PriceTicker
 	err = json.Unmarshal(body, &ticker)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parse JSON failed: %w", err)
 	}
 
 	price, err := strconv.ParseFloat(ticker.Price, 64)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parse price failed: %w", err)
 	}
 
 	return price, nil

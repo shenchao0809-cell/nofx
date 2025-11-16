@@ -85,7 +85,7 @@ func newFuturesTraderWithClient(client *futures.Client, orderStrategy string, li
 	syncBinanceServerTime(client)
 	trader := &FuturesTrader{
 		client:              client,
-		cacheDuration:       15 * time.Second, // 15秒缓存
+		cacheDuration:       30 * time.Second, // 30秒缓存（增加以减少API调用）
 		orderStrategy:       orderStrategy,
 		limitPriceOffset:    limitPriceOffset,
 		limitTimeoutSeconds: limitTimeoutSeconds,

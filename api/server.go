@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"nofx/auth"
 	"nofx/config"
 	"nofx/crypto"
@@ -46,7 +47,8 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 	// 配置允许的 CORS 来源
 	allowedOrigins := []string{
 		"http://localhost:3000",
-		"http://localhost:5173",
+		"http://localhost:4173",  // Vite preview
+		"http://localhost:5173",  // Vite dev
 	}
 	if frontendURL := os.Getenv("FRONTEND_URL"); frontendURL != "" {
 		allowedOrigins = append(allowedOrigins, frontendURL)
@@ -64,9 +66,32 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 	// 启用 CORS（白名单模式）
 	router.Use(corsMiddleware(allowedOrigins))
 
-	// 启用全局速率限制 (每秒 10 个请求)
-	globalLimiter := middleware.NewIPRateLimiter(rate.Limit(10), 10)
-	router.Use(middleware.RateLimitMiddleware(globalLimiter))
+	// 启用全局速率限制 - 调整为更宽松的限制以支持K线实时更新
+	globalLimiter := middleware.NewIPRateLimiter(rate.Limit(30), 30) // 从10提升到30（每秒30个请求）
+	// 创建CSRF token专用的速率限制器（更宽松，避免429错误：每秒50个请求）
+	csrfTokenLimiter := middleware.NewIPRateLimiter(rate.Limit(50), 50)
+	// 创建K线数据专用的速率限制器（为实时K线图提供更高的限制）
+	klineDataLimiter := middleware.NewIPRateLimiter(rate.Limit(60), 60) // 每秒60个请求
+	
+	// 对路由应用速率限制（不同端点使用不同的限制策略）
+	router.Use(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		
+		// CSRF token端点使用更宽松的速率限制
+		if path == "/api/csrf-token" {
+			middleware.RateLimitMiddleware(csrfTokenLimiter)(c)
+			return
+		}
+		
+		// K线数据端点使用专用的高频限制（支持实时更新）
+		if path == "/api/klines" || path == "/api/klines/pattern-analysis" {
+			middleware.RateLimitMiddleware(klineDataLimiter)(c)
+			return
+		}
+		
+		// 其他路由使用全局速率限制
+		middleware.RateLimitMiddleware(globalLimiter)(c)
+	})
 
 	// 启用 CSRF 保护（Double Submit Cookie 模式）
 	csrfConfig := middleware.DefaultCSRFConfig()
@@ -94,16 +119,54 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 }
 
 // corsMiddleware CORS中间件（白名单模式）
+func normalizeHost(hostPort string) string {
+	hostPort = strings.TrimSpace(strings.ToLower(hostPort))
+	if hostPort == "" {
+		return ""
+	}
+	// 尝试去掉端口
+	if parsedHost, _, err := net.SplitHostPort(hostPort); err == nil {
+		hostPort = parsedHost
+	}
+	hostPort = strings.TrimPrefix(hostPort, "www.")
+	return hostPort
+}
+
 func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
+	originSet := make(map[string]struct{}, len(allowedOrigins))
+	hostSet := make(map[string]struct{}, len(allowedOrigins))
+
+	for _, allowedOrigin := range allowedOrigins {
+		trimmed := strings.TrimSpace(allowedOrigin)
+		if trimmed == "" {
+			continue
+		}
+		originSet[trimmed] = struct{}{}
+
+		if parsed, err := url.Parse(trimmed); err == nil {
+			if host := normalizeHost(parsed.Host); host != "" {
+				hostSet[host] = struct{}{}
+			}
+		}
+	}
+
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-
-		// 检查来源是否在白名单中
+		if origin != "" {
 		allowed := false
-		for _, allowedOrigin := range allowedOrigins {
-			if origin == allowedOrigin {
+
+			if _, ok := originSet[origin]; ok {
 				allowed = true
-				break
+			} else if parsed, err := url.Parse(origin); err == nil {
+				originHost := normalizeHost(parsed.Host)
+				requestHost := normalizeHost(c.Request.Host)
+
+				if originHost != "" {
+					if originHost == requestHost {
+						allowed = true
+					} else if _, ok := hostSet[originHost]; ok {
+						allowed = true
+					}
 			}
 		}
 
@@ -111,14 +174,14 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 			c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		} else if origin != "" {
-			// 如果有 Origin 但不在白名单中，记录并拒绝
+				c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
+			} else {
 			log.Printf("⚠️ [CORS] 拒绝来源: %s (允许的来源: %v)", origin, allowedOrigins)
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "Origin not allowed",
 			})
 			return
+			}
 		}
 
 		if c.Request.Method == "OPTIONS" {
@@ -184,6 +247,10 @@ func (s *Server) setupRoutes() {
 
 			// 服务器IP查询（需要认证，用于白名单配置）
 			protected.GET("/server-ip", s.handleGetServerIP)
+
+			// K线数据和形态分析（需要认证）
+			protected.GET("/klines", s.handleGetKlines)
+			protected.GET("/klines/pattern-analysis", s.handleGetPatternAnalysis)
 
 			// AI交易员管理
 			protected.GET("/my-traders", s.handleTraderList)
@@ -1821,6 +1888,12 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 		"is_cross_margin":        traderConfig.IsCrossMargin,
 		"use_coin_pool":          traderConfig.UseCoinPool,
 		"use_oi_top":             traderConfig.UseOITop,
+		"timeframes":             traderConfig.Timeframes,  // 🔧 添加时间周期字段
+		"taker_fee_rate":         traderConfig.TakerFeeRate,
+		"maker_fee_rate":          traderConfig.MakerFeeRate,
+		"order_strategy":          traderConfig.OrderStrategy,
+		"limit_price_offset":      traderConfig.LimitPriceOffset,
+		"limit_timeout_seconds":   traderConfig.LimitTimeoutSeconds,
 		"is_running":             isRunning,
 	}
 
@@ -2987,5 +3060,95 @@ func (s *Server) handleDeletePromptTemplate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "模板删除成功",
+	})
+}
+
+// handleGetKlines 获取K线数据
+func (s *Server) handleGetKlines(c *gin.Context) {
+	symbol := c.Query("symbol")
+	interval := c.DefaultQuery("interval", "1h")
+	limitStr := c.DefaultQuery("limit", "100")
+
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol参数必填"})
+		return
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 || limit > 1000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit参数无效，范围1-1000"})
+		return
+	}
+
+	// 验证interval参数
+	validIntervals := map[string]bool{
+		"1m": true, "3m": true, "5m": true, "15m": true, "30m": true,
+		"1h": true, "2h": true, "4h": true, "6h": true, "8h": true, "12h": true,
+		"1d": true, "3d": true, "1w": true, "1M": true,
+	}
+	if !validIntervals[interval] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "interval参数无效"})
+		return
+	}
+
+	// 使用market包的APIClient获取K线数据
+	apiClient := s.traderManager.GetMarketAPIClient()
+	if apiClient == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "市场数据服务不可用"})
+		return
+	}
+
+	klines, err := apiClient.GetKlines(symbol, interval, limit)
+	if err != nil {
+		log.Printf("❌ 获取K线数据失败 %s %s: %v", symbol, interval, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线数据失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":   symbol,
+		"interval": interval,
+		"klines":   klines,
+		"count":    len(klines),
+	})
+}
+
+// handleGetPatternAnalysis 获取K线形态分析
+func (s *Server) handleGetPatternAnalysis(c *gin.Context) {
+	symbol := c.Query("symbol")
+	interval := c.DefaultQuery("interval", "1h")
+	limitStr := c.DefaultQuery("limit", "100")
+
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol参数必填"})
+		return
+	}
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	// 获取K线数据
+	apiClient := s.traderManager.GetMarketAPIClient()
+	if apiClient == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "市场数据服务不可用"})
+		return
+	}
+
+	klines, err := apiClient.GetKlines(symbol, interval, limit)
+	if err != nil {
+		log.Printf("❌ 获取K线数据失败 %s %s: %v", symbol, interval, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线数据失败: %v", err)})
+		return
+	}
+
+	// 进行形态分析
+	analysis := decision.AnalyzeKlinePatterns(klines, symbol, interval)
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":   symbol,
+		"interval": interval,
+		"analysis": analysis,
 	})
 }

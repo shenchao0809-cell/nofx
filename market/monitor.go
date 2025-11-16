@@ -17,6 +17,12 @@ const (
 	SafeMaxSymbols = 250
 )
 
+// KlineCacheEntry K线缓存条目（包含接收时间戳）
+type KlineCacheEntry struct {
+	Klines     []Kline   // K线数据
+	ReceivedAt time.Time // 数据接收时间
+}
+
 type WSMonitor struct {
 	wsClient        *WSClient
 	combinedClient  *CombinedStreamsClient
@@ -24,12 +30,12 @@ type WSMonitor struct {
 	timeframes      []string // 动态配置的时间线
 	featuresMap     sync.Map
 	alertsChan      chan Alert
-	klineDataMap1m  sync.Map      // 存储每个交易对的1分钟K线历史数据
-	klineDataMap3m  sync.Map      // 存储每个交易对的3分钟K线历史数据
-	klineDataMap15m sync.Map      // 存储每个交易对的15分钟K线历史数据
-	klineDataMap1h  sync.Map      // 存储每个交易对的1小时K线历史数据
-	klineDataMap4h  sync.Map      // 存储每个交易对的4小时K线历史数据
-	klineDataMap1d  sync.Map      // 存储每个交易对的日线K线历史数据
+	klineDataMap1m  sync.Map      // 存储每个交易对的1分钟K线历史数据 (KlineCacheEntry)
+	klineDataMap3m  sync.Map      // 存储每个交易对的3分钟K线历史数据 (KlineCacheEntry)
+	klineDataMap15m sync.Map      // 存储每个交易对的15分钟K线历史数据 (KlineCacheEntry)
+	klineDataMap1h  sync.Map      // 存储每个交易对的1小时K线历史数据 (KlineCacheEntry)
+	klineDataMap4h  sync.Map      // 存储每个交易对的4小时K线历史数据 (KlineCacheEntry)
+	klineDataMap1d  sync.Map      // 存储每个交易对的日线K线历史数据 (KlineCacheEntry)
 	tickerDataMap   sync.Map      // 存储每个交易对的ticker数据
 	oiHistoryMap    sync.Map      // P0修复：存储OI历史数据 map[symbol][]OISnapshot
 	oiStopChan      chan struct{} // P0修复：OI监控停止信号通道
@@ -329,7 +335,13 @@ func (m *WSMonitor) processKlineUpdate(symbol string, wsData KlineWSData, _time 
 	value, exists := klineDataMap.Load(symbol)
 	var klines []Kline
 	if exists {
-		klines = value.([]Kline)
+		// 从缓存条目中提取K线数据
+		if entry, ok := value.(*KlineCacheEntry); ok {
+			klines = entry.Klines
+		} else {
+			// 兼容旧格式（直接存储[]Kline）
+			klines = value.([]Kline)
+		}
 
 		// 检查是否是新的K线
 		if len(klines) > 0 && klines[len(klines)-1].OpenTime == kline.OpenTime {
@@ -348,10 +360,18 @@ func (m *WSMonitor) processKlineUpdate(symbol string, wsData KlineWSData, _time 
 		klines = []Kline{kline}
 	}
 
-	klineDataMap.Store(symbol, klines)
+	// 存储为KlineCacheEntry，包含接收时间
+	cacheEntry := &KlineCacheEntry{
+		Klines:     klines,
+		ReceivedAt: time.Now(),
+	}
+	klineDataMap.Store(symbol, cacheEntry)
 }
 
 func (m *WSMonitor) GetCurrentKlines(symbol string, duration string) ([]Kline, error) {
+	// 数据过期阈值：15分钟（超过此时间认为WebSocket数据已过期）
+	const maxDataAge = 15 * time.Minute
+
 	// 对每一个进来的symbol检测是否存在内类 是否的话就订阅它
 	value, exists := m.getKlineDataMap(duration).Load(symbol)
 	if !exists {
@@ -362,8 +382,12 @@ func (m *WSMonitor) GetCurrentKlines(symbol string, duration string) ([]Kline, e
 			return nil, fmt.Errorf("获取%v分钟K线失败: %v", duration, err)
 		}
 
-		// 动态缓存进缓存
-		m.getKlineDataMap(duration).Store(strings.ToUpper(symbol), klines)
+		// 动态缓存进缓存（包含时间戳）
+		cacheEntry := &KlineCacheEntry{
+			Klines:     klines,
+			ReceivedAt: time.Now(),
+		}
+		m.getKlineDataMap(duration).Store(strings.ToUpper(symbol), cacheEntry)
 
 		// 订阅 WebSocket 流
 		subStr := m.subscribeSymbol(symbol, duration)
@@ -379,8 +403,52 @@ func (m *WSMonitor) GetCurrentKlines(symbol string, duration string) ([]Kline, e
 		return result, nil
 	}
 
+	// 提取K线数据和接收时间
+	var klines []Kline
+	var receivedAt time.Time
+
+	if entry, ok := value.(*KlineCacheEntry); ok {
+		klines = entry.Klines
+		receivedAt = entry.ReceivedAt
+	} else {
+		// 兼容旧格式（直接存储[]Kline，无时间戳）
+		klines = value.([]Kline)
+		// 旧数据视为刚接收（避免误报）
+		receivedAt = time.Now()
+	}
+
+	// ✅ 数据时效性检测：如果数据超过15分钟未更新，回退到API获取
+	dataAge := time.Since(receivedAt)
+	if dataAge > maxDataAge {
+		log.Printf("⚠️  %s %s K线数据已过期 (%.1f分钟未更新)，回退到API获取", 
+			symbol, duration, dataAge.Minutes())
+
+		// 回退到API获取新数据
+		apiClient := NewAPIClient()
+		freshKlines, err := apiClient.GetKlines(symbol, duration, 100)
+		if err != nil {
+			// API也失败，返回过期数据并警告
+			log.Printf("❌ API获取失败: %v，使用过期缓存数据", err)
+			result := make([]Kline, len(klines))
+			copy(result, klines)
+			return result, fmt.Errorf("WebSocket数据过期且API获取失败: %v", err)
+		}
+
+		// 更新缓存
+		cacheEntry := &KlineCacheEntry{
+			Klines:     freshKlines,
+			ReceivedAt: time.Now(),
+		}
+		m.getKlineDataMap(duration).Store(symbol, cacheEntry)
+
+		log.Printf("✓ %s %s K线数据已从API刷新", symbol, duration)
+
+		result := make([]Kline, len(freshKlines))
+		copy(result, freshKlines)
+		return result, nil
+	}
+
 	// ✅ FIX: 返回深拷贝而非引用，避免并发竞态条件
-	klines := value.([]Kline)
 	result := make([]Kline, len(klines))
 	copy(result, klines)
 	return result, nil

@@ -566,7 +566,6 @@ export function TraderConfigModal({
                 </label>
                 <div className="grid grid-cols-3 gap-3">
                   {(() => {
-                    const interval = formData.scan_interval_minutes
                     const baseFrames = [
                       { value: '15m', label: '15分钟' },
                       { value: '1h', label: '1小时' },
@@ -574,17 +573,29 @@ export function TraderConfigModal({
                       { value: '1d', label: '1天' },
                     ]
 
-                    // 根据扫描间隔智能添加短周期线
+                    // 根据扫描间隔智能推荐短周期线（但显示所有选项让用户选择）
                     const getShortFrames = () => {
-                      if (interval <= 2) return [{ value: '1m', label: '1分钟' }]
-                      if (interval >= 3 && interval <= 4) return [{ value: '3m', label: '3分钟' }]
-                      if (interval >= 5 && interval < 15) return [{ value: '5m', label: '5分钟' }]
-                      return []
+                      const allShortFrames = [
+                        { value: '1m', label: '1分钟' },
+                        { value: '3m', label: '3分钟' },
+                        { value: '5m', label: '5分钟' },
+                      ]
+                      
+                      // 根据扫描间隔推荐（高亮显示），但所有选项都显示
+                      // 用户可以根据需要选择任意短周期
+                      return allShortFrames
                     }
 
                     const frames = [...getShortFrames(), ...baseFrames]
 
-                    const selectedFrames = formData.timeframes.split(',').filter(t => t)
+                    const selectedFrames = Array.from(
+                      new Set(
+                        formData.timeframes
+                          .split(',')
+                          .map((t) => t.trim())
+                          .filter(Boolean)
+                      )
+                    )
 
                     return frames.map((frame) => {
                       const isSelected = selectedFrames.includes(frame.value)
@@ -595,11 +606,16 @@ export function TraderConfigModal({
                           onClick={() => {
                             if (isSelected) {
                               // 取消勾选
-                              const newFrames = selectedFrames.filter(t => t !== frame.value)
+                              const newFrames = selectedFrames.filter(
+                                (t) => t !== frame.value
+                              )
                               handleInputChange('timeframes', newFrames.join(','))
                             } else {
                               // 勾选
-                              handleInputChange('timeframes', [...selectedFrames, frame.value].join(','))
+                              const newFrames = Array.from(
+                                new Set([...selectedFrames, frame.value])
+                              )
+                              handleInputChange('timeframes', newFrames.join(','))
                             }
                           }}
                           className="px-3 py-2 rounded text-sm font-medium transition-all"
@@ -617,8 +633,8 @@ export function TraderConfigModal({
                 </div>
                 <p className="text-xs text-gray-500 mt-2">
                   {language === 'zh'
-                    ? '根据扫描间隔智能添加短周期线：≤2分钟添加1m，3-4分钟添加3m，5-14分钟添加5m。默认勾选4小时线。'
-                    : 'Smart short-period options: ≤2min adds 1m, 3-4min adds 3m, 5-14min adds 5m. 4h is selected by default.'}
+                    ? '所有时间周期选项都已显示，可根据需要自由选择。建议：扫描间隔≤2分钟时选择1分钟，3-4分钟时选择3分钟，5-14分钟时选择5分钟。默认勾选4小时线。'
+                    : 'All timeframe options are displayed. You can freely select based on your needs. Recommended: ≤2min scan interval use 1m, 3-4min use 3m, 5-14min use 5m. 4h is selected by default.'}
                 </p>
               </div>
 

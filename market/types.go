@@ -9,6 +9,7 @@ import (
 type Data struct {
 	Symbol            string
 	CurrentPrice      float64
+	RealtimePrice     float64
 	PriceChange1h     float64 // 1小时价格变化百分比
 	PriceChange4h     float64 // 4小时价格变化百分比
 	CurrentEMA20      float64
@@ -21,6 +22,7 @@ type Data struct {
 	MidTermSeries1h   *MidTermData1h  // 1小时数据 - 中期趋势
 	LongerTermContext *LongerTermData // 4小时数据 - 长期趋势
 	DailyContext      *DailyData      // 日线数据 - 长期趋势和极端位置判断
+	RawKlines1h       []Kline         // 原始1小时K线数据（用于K线形态分析，确保数据同步）
 }
 
 // OIData Open Interest数据

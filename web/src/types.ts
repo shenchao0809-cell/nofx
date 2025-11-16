@@ -144,6 +144,8 @@ export interface CreateTraderRequest {
   maker_fee_rate?: number  // Maker 费率 (默认 0.0002 = 0.02%)
   timeframes?: string      // 时间线选择 (逗号分隔，例如: "1m,4h,1d")
   order_strategy?: string  // 订单策略 (adaptive, moderate, aggressive 等)
+  limit_price_offset?: number // 限价订单偏移
+  limit_timeout_seconds?: number // 限价订单超时时间
 }
 
 export interface UpdateModelConfigRequest {

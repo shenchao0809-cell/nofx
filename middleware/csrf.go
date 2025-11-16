@@ -37,16 +37,18 @@ func DefaultCSRFConfig() CSRFConfig {
 			"/api/config",
 			"/api/crypto/public-key",
 			"/api/prompt-templates",
-			"/api/traders",                  // 公开的 Trader 列表
+			"/api/traders",                  // 公开的 Trader 列表 + 交易员管理端点（已有JWT认证保护）
 			"/api/competition",              // 公开的竞赛数据
 			"/api/top-traders",              // 公开的 Top Traders
 			"/api/equity-history",           // 公开的权益历史
+			"/api/equity-history-batch",     // 公开批量权益历史接口（内部只读）
 			"/api/login",                    // 登录端点豁免（首次访问）
 			"/api/register",                 // 注册端点豁免
 			"/api/verify-otp",               // OTP验证端点豁免（已有OTP安全验证）
 			"/api/complete-registration",    // 完成注册端点豁免（已有OTP安全验证）
 			"/api/models",                   // 模型配置端点（已有JWT认证+RSA加密）
 			"/api/exchanges",                // 交易所配置端点（已有JWT认证+RSA加密）
+			"/api/my-traders",               // 用户交易员列表（已有JWT认证保护）
 		},
 	}
 }
@@ -81,6 +83,13 @@ func CSRFMiddleware(config CSRFConfig) gin.HandlerFunc {
 				c.Next()
 				return
 			}
+		}
+
+		// 使用 Authorization (Bearer/JWT) 的 API 请求属于 token 认证，天然防 CSRF
+		if authHeader := c.GetHeader("Authorization"); strings.TrimSpace(authHeader) != "" {
+			log.Printf("🔓 [CSRF] Authorization header detected, skip CSRF validation (path: %s)", path)
+			c.Next()
+			return
 		}
 
 		// GET 和 HEAD 请求不检查 CSRF（幂等操作）

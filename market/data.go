@@ -32,7 +32,13 @@ func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
 
-	// 获取3分钟K线数据 (最近10个)
+	// 获取1分钟K线数据（用于实时价格）
+	klines1m, err := WSMonitorCli.GetCurrentKlines(symbol, "1m")
+	if err != nil {
+		log.Printf("⚠️  WARNING: %s 获取1分钟K线失败: %v，使用3分钟K线作为实时价格", symbol, err)
+	}
+
+	// 获取3分钟K线数据 (最近10个) - 主数据源
 	klines3m, err = WSMonitorCli.GetCurrentKlines(symbol, "3m")
 	if err != nil {
 		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
@@ -75,23 +81,28 @@ func Get(symbol string) (*Data, error) {
 		klines1d = nil // 日线数据失败不影响整体流程
 	}
 
-	// 计算当前指标 (基于3分钟最新数据)
-	currentPrice := klines3m[len(klines3m)-1].Close
+	// ⚡ 关键修复：优先使用1分钟K线价格作为当前价格（最实时）
+	currentPrice := klines3m[len(klines3m)-1].Close // 3分钟K线价格（用于指标计算）
+	realtimePrice := currentPrice
+	if klines1m != nil && len(klines1m) > 0 {
+		realtimePrice = klines1m[len(klines1m)-1].Close // 1分钟K线价格（最实时）
+		// ⚡ 关键：使用1分钟K线价格作为CurrentPrice，确保AI决策基于最新价格
+		currentPrice = realtimePrice
+	}
+
 	currentEMA20 := calculateEMA(klines3m, 20)
-	currentMACD := calculateMACD(klines3m)
-	currentRSI7 := calculateRSI(klines3m, 7)
+	currentMACD := calculateMACD(klines1h)
+	currentRSI7 := calculateRSI(klines1h, 7)
 
 	// 计算价格变化百分比
-	// 1小时价格变化 = 20个3分钟K线前的价格
 	priceChange1h := 0.0
-	if len(klines3m) >= 21 { // 至少需要21根K线 (当前 + 20根前)
-		price1hAgo := klines3m[len(klines3m)-21].Close
+	if len(klines1h) >= 2 {
+		price1hAgo := klines1h[len(klines1h)-2].Close
 		if price1hAgo > 0 {
 			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
 		}
 	}
 
-	// 4小时价格变化 = 1个4小时K线前的价格
 	priceChange4h := 0.0
 	if len(klines4h) >= 2 {
 		price4hAgo := klines4h[len(klines4h)-2].Close
@@ -131,6 +142,7 @@ func Get(symbol string) (*Data, error) {
 	return &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
+		RealtimePrice:     realtimePrice,
 		PriceChange1h:     priceChange1h,
 		PriceChange4h:     priceChange4h,
 		CurrentEMA20:      currentEMA20,
@@ -143,6 +155,133 @@ func Get(symbol string) (*Data, error) {
 		MidTermSeries1h:   midTermData1h,
 		LongerTermContext: longerTermData,
 		DailyContext:      dailyData,
+		RawKlines1h:       klines1h, // 保存原始1小时K线数据，用于K线形态分析
+	}, nil
+}
+
+// GetFresh 强制从API获取最新市场数据（用于AI决策，确保使用最新价格）
+// 与Get()的区别：GetFresh()强制从API获取，不使用WebSocket缓存
+func GetFresh(symbol string) (*Data, error) {
+	var klines1m, klines3m, klines15m, klines1h, klines4h, klines1d []Kline
+	var err error
+	// 标准化symbol
+	symbol = Normalize(symbol)
+
+	// 创建API客户端，强制从API获取最新数据
+	apiClient := NewAPIClient()
+
+	log.Printf("🔄 [GetFresh] 强制从API获取 %s 的最新市场数据（用于AI决策）", symbol)
+
+	// 强制从API获取所有K线数据（不使用WebSocket缓存）
+	klines1m, err = apiClient.GetKlines(symbol, "1m", 100)
+	if err != nil {
+		return nil, fmt.Errorf("获取1分钟K线失败: %v", err)
+	}
+
+	klines3m, err = apiClient.GetKlines(symbol, "3m", 100)
+	if err != nil {
+		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
+	}
+
+	klines15m, err = apiClient.GetKlines(symbol, "15m", 100)
+	if err != nil {
+		return nil, fmt.Errorf("获取15分钟K线失败: %v", err)
+	}
+
+	klines1h, err = apiClient.GetKlines(symbol, "1h", 100)
+	if err != nil {
+		return nil, fmt.Errorf("获取1小时K线失败: %v", err)
+	}
+
+	klines4h, err = apiClient.GetKlines(symbol, "4h", 100)
+	if err != nil {
+		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
+	}
+
+	// P0修复：检查 4h 数据完整性
+	if len(klines4h) == 0 {
+		log.Printf("⚠️  WARNING: %s 缺少 4h K线数据，无法进行多周期趋势确认", symbol)
+		return nil, fmt.Errorf("%s 缺少 4h K线数据", symbol)
+	}
+
+	// 获取日线K线数据
+	klines1d, err = apiClient.GetKlines(symbol, "1d", 100)
+	if err != nil {
+		log.Printf("⚠️  WARNING: %s 获取日线K线失败: %v，将继续处理但缺少日线数据", symbol, err)
+		klines1d = nil
+	}
+
+	// ⚡ 关键修复：优先使用1分钟K线价格作为当前价格（最实时）
+	// 如果1分钟K线不可用，回退到3分钟K线价格
+	currentPrice := klines3m[len(klines3m)-1].Close // 3分钟K线价格（用于指标计算）
+	realtimePrice := currentPrice
+	if len(klines1m) > 0 {
+		realtimePrice = klines1m[len(klines1m)-1].Close // 1分钟K线价格（最实时）
+		// ⚡ 关键：使用1分钟K线价格作为CurrentPrice，确保AI决策基于最新价格
+		currentPrice = realtimePrice
+		log.Printf("✅ [GetFresh] %s 使用1分钟K线价格: %.2f", symbol, realtimePrice)
+	} else {
+		log.Printf("⚠️ [GetFresh] %s 1分钟K线不可用，使用3分钟K线价格: %.2f", symbol, currentPrice)
+	}
+
+	currentEMA20 := calculateEMA(klines3m, 20)
+	currentMACD := calculateMACD(klines1h)
+	currentRSI7 := calculateRSI(klines1h, 7)
+
+	// 计算价格变化百分比
+	priceChange1h := 0.0
+	if len(klines1h) >= 2 {
+		price1hAgo := klines1h[len(klines1h)-2].Close
+		if price1hAgo > 0 {
+			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
+		}
+	}
+
+	priceChange4h := 0.0
+	if len(klines4h) >= 2 {
+		price4hAgo := klines4h[len(klines4h)-2].Close
+		if price4hAgo > 0 {
+			priceChange4h = ((currentPrice - price4hAgo) / price4hAgo) * 100
+		}
+	}
+
+	// 获取OI数据
+	oiData, err := getOpenInterestData(symbol)
+	if err != nil {
+		oiData = &OIData{Latest: 0, Average: 0, ActualPeriod: "N/A"}
+	}
+
+	// 获取Funding Rate
+	fundingRate, _ := getFundingRate(symbol)
+
+	// 计算日内系列数据
+	intradayData := calculateIntradaySeries(klines3m)
+	midTermData15m := calculateMidTermSeries15m(klines15m)
+	midTermData1h := calculateMidTermSeries1h(klines1h)
+	longerTermData := calculateLongerTermData(klines4h)
+
+	var dailyData *DailyData
+	if len(klines1d) > 0 {
+		dailyData = calculateDailyData(klines1d)
+	}
+
+	return &Data{
+		Symbol:            symbol,
+		CurrentPrice:      currentPrice,
+		RealtimePrice:     realtimePrice,
+		PriceChange1h:     priceChange1h,
+		PriceChange4h:     priceChange4h,
+		CurrentEMA20:      currentEMA20,
+		CurrentMACD:       currentMACD,
+		CurrentRSI7:       currentRSI7,
+		OpenInterest:      oiData,
+		FundingRate:       fundingRate,
+		IntradaySeries:    intradayData,
+		MidTermSeries15m:  midTermData15m,
+		MidTermSeries1h:   midTermData1h,
+		LongerTermContext: longerTermData,
+		DailyContext:      dailyData,
+		RawKlines1h:       klines1h, // 保存原始1小时K线数据，用于K线形态分析
 	}, nil
 }
 

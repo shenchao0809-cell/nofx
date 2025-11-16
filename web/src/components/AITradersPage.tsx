@@ -332,6 +332,12 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         is_cross_margin: data.is_cross_margin,
         use_coin_pool: data.use_coin_pool,
         use_oi_top: data.use_oi_top,
+        taker_fee_rate: data.taker_fee_rate,
+        maker_fee_rate: data.maker_fee_rate,
+        timeframes: data.timeframes,
+        order_strategy: data.order_strategy,
+        limit_price_offset: data.limit_price_offset,
+        limit_timeout_seconds: data.limit_timeout_seconds,
       }
 
       const traderId = editingTrader.trader_id
@@ -354,10 +360,8 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
   }
 
   const handleDeleteTrader = async (traderId: string) => {
-    {
-      const ok = await confirmToast(t('confirmDeleteTrader', language))
-      if (!ok) return
-    }
+    const ok = await confirmToast(t('confirmDeleteTrader', language))
+    if (!ok) return
 
     try {
       await toast.promise(api.deleteTrader(traderId), {

@@ -4,6 +4,7 @@ import useSWR from 'swr'
 import { api } from '../lib/api'
 import { EquityChart } from '../components/EquityChart'
 import AILearning from '../components/AILearning'
+import KlineChart from '../components/KlineChart'
 import { useLanguage } from '../contexts/LanguageContext'
 import { useAuth } from '../contexts/AuthContext'
 import { t, type Language } from '../i18n/translations'
@@ -29,6 +30,45 @@ import type {
   Statistics,
   TraderInfo,
 } from '../types'
+
+// 实时BTC价格组件
+function RealTimeBTCPrice() {
+  const { token } = useAuth()
+  const { data: klineData } = useSWR(
+    token ? 'btc-realtime-price' : null,
+    async () => {
+      const response = await fetch(
+        `/api/klines?symbol=BTCUSDT&interval=3m&limit=1`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        }
+      )
+      if (!response.ok) return null
+      const result = await response.json()
+      const klines = result.klines || []
+      if (klines.length === 0) return null
+      return klines[klines.length - 1].close
+    },
+    {
+      refreshInterval: 3000, // 每3秒刷新一次（实时更新）
+      revalidateOnFocus: true,
+      dedupingInterval: 2000,
+    }
+  )
+
+  if (!klineData) return null
+
+  return (
+    <div className="text-xs" style={{ color: '#848E9C' }}>
+      <span style={{ color: '#F0B90B' }}>BTC实时价格: </span>
+      <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>
+        {klineData.toFixed(2)}
+      </span>
+    </div>
+  )
+}
 
 // 获取友好的AI模型名称
 function getModelDisplayName(modelId: string): string {
@@ -424,6 +464,28 @@ export default function TraderDashboard() {
             <EquityChart traderId={selectedTrader.trader_id} />
           </div>
 
+        {/* K线图表 - 只要有交易员ID就显示 */}
+        {selectedTraderId && (
+          <div className="binance-card p-6 animate-slide-in" style={{ animationDelay: '0.12s' }}>
+            <h2 className="text-xl font-bold flex items-center gap-2 mb-5" style={{ color: '#EAECEF' }}>
+              <PieChart className="w-5 h-5" style={{ color: '#F0B90B' }} />
+              实时K线图表
+            </h2>
+            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>
+              点击币种按钮查看对应的K线图和形态分析，实时更新供AI决策参考
+            </div>
+            {selectedTraderId && (
+              <KlineChart 
+                traderId={selectedTraderId}
+                interval="1h" 
+                height={400}
+                autoRefresh={true}
+                refreshInterval={3000}
+              />
+            )}
+          </div>
+        )}
+
           {/* Current Positions */}
           <div
             className="binance-card p-6 animate-slide-in"
@@ -735,6 +797,53 @@ function DecisionCard({
 }) {
   const [showInputPrompt, setShowInputPrompt] = useState(false)
   const [showCoT, setShowCoT] = useState(false)
+  const { token } = useAuth()
+  
+  // 获取实时BTC价格用于对比
+  const { data: realtimeBTC } = useSWR(
+    token ? 'realtime-btc-for-decision' : null,
+    async () => {
+      const response = await fetch(
+        `/api/klines?symbol=BTCUSDT&interval=3m&limit=1`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        }
+      )
+      if (!response.ok) return null
+      const result = await response.json()
+      const klines = result.klines || []
+      if (klines.length === 0) return null
+      const latestKline = klines[klines.length - 1]
+      return {
+        price: latestKline.close,
+        timestamp: latestKline.openTime,
+      }
+    },
+    {
+      refreshInterval: 3000, // 每3秒刷新（实时更新）
+      revalidateOnFocus: true,
+      dedupingInterval: 2000,
+    }
+  )
+  
+  // 从input_prompt中提取BTC价格信息
+  const extractBTCInfo = (prompt: string) => {
+    const btcMatch = prompt.match(/BTC:\s*([\d.]+)\s*\(1h:\s*([+-]?[\d.]+)%,\s*4h:\s*([+-]?[\d.]+)%\)\s*\|\s*MACD:\s*([\d.]+)\s*\|\s*RSI:\s*([\d.]+)/)
+    if (btcMatch) {
+      return {
+        price: parseFloat(btcMatch[1]),
+        change1h: parseFloat(btcMatch[2]),
+        change4h: parseFloat(btcMatch[3]),
+        macd: parseFloat(btcMatch[4]),
+        rsi: parseFloat(btcMatch[5]),
+      }
+    }
+    return null
+  }
+  
+  const decisionBTCInfo = decision.input_prompt ? extractBTCInfo(decision.input_prompt) : null
 
   return (
     <div
@@ -754,6 +863,10 @@ function DecisionCard({
           <div className="text-xs" style={{ color: '#848E9C' }}>
             {new Date(decision.timestamp).toLocaleString()}
           </div>
+          {/* 实时BTC价格显示 */}
+          <div className="mt-1">
+              <RealTimeBTCPrice />
+          </div>
         </div>
         <div
           className="px-3 py-1 rounded text-xs font-bold"
@@ -766,6 +879,61 @@ function DecisionCard({
           {t(decision.success ? 'success' : 'failed', language)}
         </div>
       </div>
+
+      {/* BTC价格对比 - 显示决策时的价格和当前实时价格 */}
+      {decisionBTCInfo && (
+        <div className="mb-3 p-3 rounded" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+          <div className="text-xs mb-2 font-semibold" style={{ color: '#848E9C' }}>
+            BTC价格对比
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
+                决策时价格（历史快照）
+              </div>
+              <div className="font-mono" style={{ color: '#EAECEF' }}>
+                <div>价格: <span style={{ color: '#F0B90B' }}>{decisionBTCInfo.price.toFixed(2)}</span></div>
+                <div>1h: <span style={{ color: decisionBTCInfo.change1h >= 0 ? '#0ECB81' : '#F6465D' }}>
+                  {decisionBTCInfo.change1h >= 0 ? '+' : ''}{decisionBTCInfo.change1h.toFixed(2)}%
+                </span></div>
+                <div>4h: <span style={{ color: decisionBTCInfo.change4h >= 0 ? '#0ECB81' : '#F6465D' }}>
+                  {decisionBTCInfo.change4h >= 0 ? '+' : ''}{decisionBTCInfo.change4h.toFixed(2)}%
+                </span></div>
+                <div>MACD: <span style={{ color: '#60a5fa' }}>{decisionBTCInfo.macd.toFixed(4)}</span></div>
+                <div>RSI: <span style={{ color: '#60a5fa' }}>{decisionBTCInfo.rsi.toFixed(2)}</span></div>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
+                当前实时价格
+              </div>
+              {realtimeBTC ? (
+                <div className="font-mono" style={{ color: '#EAECEF' }}>
+                  <div>价格: <span style={{ color: '#0ECB81' }}>{realtimeBTC.price.toFixed(2)}</span></div>
+                  <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
+                    {decisionBTCInfo.price !== realtimeBTC.price && (
+                      <span style={{ 
+                        color: realtimeBTC.price > decisionBTCInfo.price ? '#0ECB81' : '#F6465D' 
+                      }}>
+                        {realtimeBTC.price > decisionBTCInfo.price ? '↑' : '↓'} 
+                        {Math.abs(realtimeBTC.price - decisionBTCInfo.price).toFixed(2)} 
+                        ({((realtimeBTC.price - decisionBTCInfo.price) / decisionBTCInfo.price * 100).toFixed(2)}%)
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs mt-2" style={{ color: '#848E9C' }}>
+                    实时更新中...
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs" style={{ color: '#848E9C' }}>
+                  加载中...
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Input Prompt - Collapsible */}
       {decision.input_prompt && (

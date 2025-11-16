@@ -7,7 +7,61 @@
  * - Auth state cleanup on unauthorized
  * - Automatic redirect to login page
  * - Notification shown on login page after redirect
+ * - Automatic CSRF token handling for POST/PUT/DELETE requests
  */
+
+// CSRF Token 管理器
+class CSRFTokenManager {
+  private token: string | null = null
+  private tokenPromise: Promise<string> | null = null
+
+  async getToken(): Promise<string | null> {
+    // 如果已有token，直接返回
+    if (this.token) {
+      return this.token
+    }
+
+    // 如果正在获取token，等待获取完成
+    if (this.tokenPromise) {
+      return this.tokenPromise
+    }
+
+    // 获取新token
+    this.tokenPromise = this.fetchToken()
+    const token = await this.tokenPromise
+    this.tokenPromise = null
+    return token
+  }
+
+  private async fetchToken(): Promise<string> {
+    try {
+      // CSRF token存储在HttpOnly Cookie中，前端无法直接读取
+      // 需要从API获取token（API会从Cookie中读取并返回）
+      const response = await fetch('/api/csrf-token', {
+        method: 'GET',
+        credentials: 'include', // 重要：包含Cookie
+      })
+      if (response.ok) {
+        const data = await response.json()
+        // API返回的token应该和Cookie中的token一致
+        this.token = data.csrf_token || data.token
+        if (this.token) {
+          return this.token
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch CSRF token:', err)
+    }
+    return ''
+  }
+
+  clearToken() {
+    this.token = null
+    this.tokenPromise = null
+  }
+}
+
+const csrfTokenManager = new CSRFTokenManager()
 
 export class HttpClient {
   // Singleton flag to prevent duplicate 401 handling
@@ -67,9 +121,11 @@ export class HttpClient {
       throw new Error('登录已过期，请重新登录')
     }
 
-    // Handle other common errors
+    // Handle 403 Forbidden - 可能是CSRF token问题
     if (response.status === 403) {
-      throw new Error('没有权限访问此资源')
+      // 清除CSRF token，下次请求时重新获取
+      csrfTokenManager.clearToken()
+      throw new Error('没有权限访问此资源（可能是CSRF token问题，请重试）')
     }
 
     if (response.status === 404) {
@@ -102,12 +158,22 @@ export class HttpClient {
     body?: any,
     headers?: Record<string, string>
   ): Promise<Response> {
+    // 获取CSRF token
+    const csrfToken = await csrfTokenManager.getToken()
+    const requestHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...headers,
+    }
+    
+    // 添加CSRF token到请求头
+    if (csrfToken) {
+      requestHeaders['X-CSRF-Token'] = csrfToken
+    }
+
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...headers,
-      },
+      headers: requestHeaders,
+      credentials: 'include', // 包含cookies（CSRF token可能在cookie中）
       body: body ? JSON.stringify(body) : undefined,
     })
     return this.handleResponse(response)
@@ -121,12 +187,22 @@ export class HttpClient {
     body?: any,
     headers?: Record<string, string>
   ): Promise<Response> {
+    // 获取CSRF token
+    const csrfToken = await csrfTokenManager.getToken()
+    const requestHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...headers,
+    }
+    
+    // 添加CSRF token到请求头
+    if (csrfToken) {
+      requestHeaders['X-CSRF-Token'] = csrfToken
+    }
+
     const response = await fetch(url, {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        ...headers,
-      },
+      headers: requestHeaders,
+      credentials: 'include', // 包含cookies（CSRF token可能在cookie中）
       body: body ? JSON.stringify(body) : undefined,
     })
     return this.handleResponse(response)
@@ -139,9 +215,21 @@ export class HttpClient {
     url: string,
     headers?: Record<string, string>
   ): Promise<Response> {
+    // 获取CSRF token
+    const csrfToken = await csrfTokenManager.getToken()
+    const requestHeaders: Record<string, string> = {
+      ...headers,
+    }
+    
+    // 添加CSRF token到请求头
+    if (csrfToken) {
+      requestHeaders['X-CSRF-Token'] = csrfToken
+    }
+
     const response = await fetch(url, {
       method: 'DELETE',
-      headers,
+      headers: requestHeaders,
+      credentials: 'include', // 包含cookies（CSRF token可能在cookie中）
     })
     return this.handleResponse(response)
   }

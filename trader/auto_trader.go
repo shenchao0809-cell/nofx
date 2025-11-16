@@ -11,6 +11,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +86,9 @@ type AutoTraderConfig struct {
 	OrderStrategy       string  // Order strategy: "market_only", "conservative_hybrid", "limit_only"
 	LimitPriceOffset    float64 // Limit order price offset percentage (e.g., -0.03 for -0.03%)
 	LimitTimeoutSeconds int     // Timeout in seconds before converting to market order
+
+	// K线时间周期配置
+	Timeframes string // 时间周期列表（逗号分隔，例如："1m,3m,1h,4h,1d"）
 }
 
 // AutoTrader 自动交易器
@@ -120,6 +124,10 @@ type AutoTrader struct {
 	lastBalanceSyncTime   time.Time                        // 上次余额同步时间
 	database              interface{}                      // 数据库引用（用于自动更新余额）
 	userID                string                           // 用户ID
+	disableRiskGuards     bool                             // 是否禁用自研风控
+	decisionCyclePositions []map[string]interface{}        // 决策周期内的持仓缓存（减少API调用）
+	decisionCyclePositionsTime time.Time                    // 持仓缓存时间
+	decisionCyclePositionsMutex sync.RWMutex               // 持仓缓存读写锁
 }
 
 // NewAutoTrader 创建自动交易器
@@ -230,7 +238,9 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		systemPromptTemplate = "adaptive"
 	}
 
-	return &AutoTrader{
+	disableRiskGuards := strings.ToLower(os.Getenv("DISABLE_DYNAMIC_RISK_GUARDS")) == "true"
+
+	at := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
 		aiModel:               config.AIModel,
@@ -258,7 +268,17 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 		lastBalanceSyncTime:   time.Now(), // 初始化为当前时间
 		database:              database,
 		userID:                userID,
-	}, nil
+		disableRiskGuards:     disableRiskGuards,
+		decisionCyclePositions: nil, // 初始化为空
+		decisionCyclePositionsTime: time.Time{}, // 初始化为零值
+		decisionCyclePositionsMutex: sync.RWMutex{},
+	}
+
+	if at.disableRiskGuards {
+		log.Printf("⚠️ [%s] 已禁用自研风控（DISABLE_DYNAMIC_RISK_GUARDS=true）", at.name)
+	}
+
+	return at, nil
 }
 
 // Run 运行自动交易主循环
@@ -504,6 +524,36 @@ func (at *AutoTrader) runCycle() error {
 	}
 	log.Println()
 
+	// 🔧 在执行决策前，先获取一次持仓信息并缓存（减少API调用）
+	// 这样在同一个决策周期内，所有需要持仓信息的操作都可以复用这个缓存
+	at.decisionCyclePositionsMutex.Lock()
+	at.decisionCyclePositions = nil // 清除旧缓存
+	at.decisionCyclePositionsTime = time.Time{}
+	at.decisionCyclePositionsMutex.Unlock()
+	
+	// 预获取持仓信息（如果决策中包含需要持仓信息的操作）
+	needsPositions := false
+	for _, d := range sortedDecisions {
+		if d.Action == "update_stop_loss" || d.Action == "update_take_profit" || 
+		   d.Action == "partial_close" || d.Action == "close_long" || d.Action == "close_short" {
+			needsPositions = true
+			break
+		}
+	}
+	
+	if needsPositions {
+		positions, err := at.trader.GetPositions()
+		if err == nil {
+			at.decisionCyclePositionsMutex.Lock()
+			at.decisionCyclePositions = positions
+			at.decisionCyclePositionsTime = time.Now()
+			at.decisionCyclePositionsMutex.Unlock()
+			log.Printf("💾 已缓存持仓信息（决策周期内复用，减少API调用）")
+		} else {
+			log.Printf("⚠️ 预获取持仓信息失败: %v（将在需要时重新获取）", err)
+		}
+	}
+
 	// 执行决策并记录结果
 	for _, d := range sortedDecisions {
 		actionRecord := logger.DecisionAction{
@@ -748,6 +798,18 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	}
 
 	// 7. Build context
+	// 解析时间周期配置
+	timeframes := []string{}
+	if at.config.Timeframes != "" {
+		timeframeStrs := strings.Split(at.config.Timeframes, ",")
+		for _, tf := range timeframeStrs {
+			tf = strings.TrimSpace(tf)
+			if tf != "" {
+				timeframes = append(timeframes, tf)
+			}
+		}
+	}
+
 	ctx := &decision.Context{
 		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
 		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
@@ -756,6 +818,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		AltcoinLeverage: at.config.AltcoinLeverage, // 使用配置的杠杆倍数
 		TakerFeeRate:    at.config.TakerFeeRate,    // Use configured taker fee rate
 		MakerFeeRate:    at.config.MakerFeeRate,    // Use configured maker fee rate
+		Timeframes:      timeframes,                 // 配置的时间周期列表
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -819,15 +882,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	if err != nil {
 		return err
 	}
-
-	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
-	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+	price := marketData.CurrentPrice
 
 	// ⚠️ 保证金验证：防止保证金不足错误（code=-2019）
-	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
-
 	balance, err := at.trader.GetBalance()
 	if err != nil {
 		return fmt.Errorf("获取账户余额失败: %w", err)
@@ -837,14 +894,35 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		availableBalance = avail
 	}
 
-	// 手续费估算（Taker费率 0.04%）
-	estimatedFee := decision.PositionSizeUSD * 0.0004
+	adjustMsg, err := at.normalizePositionSize(decision, availableBalance)
+	if err != nil {
+		return fmt.Errorf("❌ %s", err.Error())
+	}
+	if adjustMsg != "" {
+		log.Printf("  ⚙️ %s", adjustMsg)
+		if actionRecord.Reason != "" {
+			actionRecord.Reason = fmt.Sprintf("%s | AUTO: %s", actionRecord.Reason, adjustMsg)
+		} else {
+			actionRecord.Reason = fmt.Sprintf("AUTO: %s", adjustMsg)
+		}
+	}
+
+	// 手续费估算
+	feeRate := at.effectiveTakerFeeRate()
+	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
+	estimatedFee := decision.PositionSizeUSD * feeRate
 	totalRequired := requiredMargin + estimatedFee
 
 	if totalRequired > availableBalance {
 		return fmt.Errorf("❌ 保证金不足: 需要 %.2f USDT（保证金 %.2f + 手续费 %.2f），可用 %.2f USDT",
 			totalRequired, requiredMargin, estimatedFee, availableBalance)
 	}
+
+	// 计算最终数量
+	quantity := decision.PositionSizeUSD / price
+	actionRecord.Quantity = quantity
+	actionRecord.Price = price
+	actionRecord.Leverage = decision.Leverage
 
 	// 设置仓位模式
 	if err := at.trader.SetMarginMode(decision.Symbol, at.config.IsCrossMargin); err != nil {
@@ -903,15 +981,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	if err != nil {
 		return err
 	}
-
-	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
-	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+	price := marketData.CurrentPrice
 
 	// ⚠️ 保证金验证：防止保证金不足错误（code=-2019）
-	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
-
 	balance, err := at.trader.GetBalance()
 	if err != nil {
 		return fmt.Errorf("获取账户余额失败: %w", err)
@@ -921,14 +993,34 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		availableBalance = avail
 	}
 
-	// 手续费估算（Taker费率 0.04%）
-	estimatedFee := decision.PositionSizeUSD * 0.0004
+	adjustMsg, err := at.normalizePositionSize(decision, availableBalance)
+	if err != nil {
+		return fmt.Errorf("❌ %s", err.Error())
+	}
+	if adjustMsg != "" {
+		log.Printf("  ⚙️ %s", adjustMsg)
+		if actionRecord.Reason != "" {
+			actionRecord.Reason = fmt.Sprintf("%s | AUTO: %s", actionRecord.Reason, adjustMsg)
+		} else {
+			actionRecord.Reason = fmt.Sprintf("AUTO: %s", adjustMsg)
+		}
+	}
+
+	feeRate := at.effectiveTakerFeeRate()
+	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
+	estimatedFee := decision.PositionSizeUSD * feeRate
 	totalRequired := requiredMargin + estimatedFee
 
 	if totalRequired > availableBalance {
 		return fmt.Errorf("❌ 保证金不足: 需要 %.2f USDT（保证金 %.2f + 手续费 %.2f），可用 %.2f USDT",
 			totalRequired, requiredMargin, estimatedFee, availableBalance)
 	}
+
+	// 计算最终数量
+	quantity := decision.PositionSizeUSD / price
+	actionRecord.Quantity = quantity
+	actionRecord.Price = price
+	actionRecord.Leverage = decision.Leverage
 
 	// 设置仓位模式
 	if err := at.trader.SetMarginMode(decision.Symbol, at.config.IsCrossMargin); err != nil {
@@ -1047,10 +1139,28 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
-	// 获取当前持仓
-	positions, err := at.trader.GetPositions()
+	// 🔧 优先使用决策周期内的持仓缓存（减少API调用）
+	var positions []map[string]interface{}
+	
+	at.decisionCyclePositionsMutex.RLock()
+	if at.decisionCyclePositions != nil && time.Since(at.decisionCyclePositionsTime) < 30*time.Second {
+		// 使用缓存（30秒内有效）
+		positions = at.decisionCyclePositions
+		at.decisionCyclePositionsMutex.RUnlock()
+		log.Printf("  💾 使用缓存的持仓信息（减少API调用）")
+	} else {
+		at.decisionCyclePositionsMutex.RUnlock()
+		// 缓存过期或不存在，调用API
+		var err error
+		positions, err = at.trader.GetPositions()
 	if err != nil {
 		return fmt.Errorf("获取持仓失败: %w", err)
+		}
+		// 更新缓存
+		at.decisionCyclePositionsMutex.Lock()
+		at.decisionCyclePositions = positions
+		at.decisionCyclePositionsTime = time.Now()
+		at.decisionCyclePositionsMutex.Unlock()
 	}
 
 	// 查找目标持仓
@@ -1093,6 +1203,16 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	positionAmt, _ := targetPosition["positionAmt"].(float64)
 	if pnl, ok := targetPosition["unRealizedProfit"].(float64); ok {
 		actionRecord.PnL = pnl
+	}
+
+	if normalizedStop, adjustMsg := at.normalizeStopLoss(positionSide, decision.NewStopLoss, marketData.CurrentPrice); adjustMsg != "" {
+		log.Printf("  ⚙️ %s", adjustMsg)
+		if actionRecord.Reason != "" {
+			actionRecord.Reason = fmt.Sprintf("%s | AUTO: %s", actionRecord.Reason, adjustMsg)
+		} else {
+			actionRecord.Reason = fmt.Sprintf("AUTO: %s", adjustMsg)
+		}
+		decision.NewStopLoss = normalizedStop
 	}
 
 	// ⚡ 智能验证新止损价格合理性（考虑价格波动容差）
@@ -1179,10 +1299,28 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
-	// 获取当前持仓
-	positions, err := at.trader.GetPositions()
+	// 🔧 优先使用决策周期内的持仓缓存（减少API调用）
+	var positions []map[string]interface{}
+	
+	at.decisionCyclePositionsMutex.RLock()
+	if at.decisionCyclePositions != nil && time.Since(at.decisionCyclePositionsTime) < 30*time.Second {
+		// 使用缓存（30秒内有效）
+		positions = at.decisionCyclePositions
+		at.decisionCyclePositionsMutex.RUnlock()
+		log.Printf("  💾 使用缓存的持仓信息（减少API调用）")
+	} else {
+		at.decisionCyclePositionsMutex.RUnlock()
+		// 缓存过期或不存在，调用API
+		var err error
+		positions, err = at.trader.GetPositions()
 	if err != nil {
 		return fmt.Errorf("获取持仓失败: %w", err)
+		}
+		// 更新缓存
+		at.decisionCyclePositionsMutex.Lock()
+		at.decisionCyclePositions = positions
+		at.decisionCyclePositionsTime = time.Now()
+		at.decisionCyclePositionsMutex.Unlock()
 	}
 
 	// 查找目标持仓
@@ -1313,10 +1451,28 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
-	// 获取当前持仓
-	positions, err := at.trader.GetPositions()
+	// 🔧 优先使用决策周期内的持仓缓存（减少API调用）
+	var positions []map[string]interface{}
+	
+	at.decisionCyclePositionsMutex.RLock()
+	if at.decisionCyclePositions != nil && time.Since(at.decisionCyclePositionsTime) < 30*time.Second {
+		// 使用缓存（30秒内有效）
+		positions = at.decisionCyclePositions
+		at.decisionCyclePositionsMutex.RUnlock()
+		log.Printf("  💾 使用缓存的持仓信息（减少API调用）")
+	} else {
+		at.decisionCyclePositionsMutex.RUnlock()
+		// 缓存过期或不存在，调用API
+		var err error
+		positions, err = at.trader.GetPositions()
 	if err != nil {
 		return fmt.Errorf("获取持仓失败: %w", err)
+		}
+		// 更新缓存
+		at.decisionCyclePositionsMutex.Lock()
+		at.decisionCyclePositions = positions
+		at.decisionCyclePositionsTime = time.Now()
+		at.decisionCyclePositionsMutex.Unlock()
 	}
 
 	// 查找目标持仓
@@ -1697,7 +1853,214 @@ func calculatePnLPercentage(unrealizedPnl, marginUsed float64) float64 {
 	return 0.0
 }
 
+// normalizeStopLoss 自动修正止损价，避免因AI决策或行情波动导致的异常值
+func (at *AutoTrader) normalizeStopLoss(positionSide string, requestedStop float64, currentPrice float64) (float64, string) {
+	const maxGapPct = 0.5       // 超过该差值视作异常
+	const safetyBufferPct = 0.2 // 自动调整时预留的安全缓冲（0.2%）
+
+	if currentPrice <= 0 || requestedStop <= 0 {
+		return requestedStop, ""
+	}
+
+	adjustments := []string{}
+
+	switch positionSide {
+	case "LONG":
+		if requestedStop > currentPrice {
+			gapPct := (requestedStop - currentPrice) / currentPrice * 100
+			if gapPct > maxGapPct {
+				safeStop := currentPrice * (1 - safetyBufferPct/100)
+				if safeStop <= 0 {
+					safeStop = currentPrice * 0.99
+				}
+				adjustments = append(adjustments,
+					fmt.Sprintf("多单止损价 %.2f 高于市价 %.2f (差距 %.2f%%)，自动调整至 %.2f", requestedStop, currentPrice, gapPct, safeStop))
+				requestedStop = safeStop
+			}
+		}
+	case "SHORT":
+		if requestedStop < currentPrice {
+			gapPct := (currentPrice - requestedStop) / currentPrice * 100
+			if gapPct > maxGapPct {
+				safeStop := currentPrice * (1 + safetyBufferPct/100)
+				adjustments = append(adjustments,
+					fmt.Sprintf("空单止损价 %.2f 低于市价 %.2f (差距 %.2f%%)，自动调整至 %.2f", requestedStop, currentPrice, gapPct, safeStop))
+				requestedStop = safeStop
+			}
+		}
+	}
+
+	return requestedStop, strings.Join(adjustments, "；")
+}
+
+// defaultLeverageForSymbol 根据币种返回默认杠杆（当AI未提供时兜底）
+func (at *AutoTrader) defaultLeverageForSymbol(symbol string) int {
+	base := strings.ToUpper(symbol)
+	if strings.HasSuffix(base, "USDT") {
+		base = strings.TrimSuffix(base, "USDT")
+	}
+
+	switch base {
+	case "BTC", "ETH":
+		if at.config.BTCETHLeverage > 0 {
+			return at.config.BTCETHLeverage
+		}
+	default:
+		if at.config.AltcoinLeverage > 0 {
+			return at.config.AltcoinLeverage
+		}
+	}
+
+	// 兜底返回 3 倍
+	return 3
+}
+
+// minNotionalForSymbol 返回币种在交易所的保守最小名义价值要求
+func (at *AutoTrader) minNotionalForSymbol(symbol string) float64 {
+	base := strings.ToUpper(symbol)
+	if strings.HasSuffix(base, "USDT") {
+		base = strings.TrimSuffix(base, "USDT")
+	}
+
+	switch base {
+	case "BTC":
+		return 105.0
+	case "ETH":
+		return 60.0
+	case "BNB":
+		return 40.0
+	case "SOL":
+		return 25.0
+	case "XRP", "DOGE", "ADA", "LINK", "MATIC", "OP", "ARB":
+		return 20.0
+	default:
+		return 12.0
+	}
+}
+
+// effectiveTakerFeeRate 返回有效的Taker费率（配置为空时使用默认值）
+func (at *AutoTrader) effectiveTakerFeeRate() float64 {
+	if at.config.TakerFeeRate > 0 {
+		return at.config.TakerFeeRate
+	}
+	return 0.0004
+}
+
+// normalizePositionSize 根据可用保证金与最小名义价值自动调整仓位
+func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availableBalance float64) (string, error) {
+	if availableBalance <= 0 {
+		return "", fmt.Errorf("可用余额 %.2f USDT 无法开仓", availableBalance)
+	}
+
+	if decision.Leverage <= 0 {
+		decision.Leverage = at.defaultLeverageForSymbol(decision.Symbol)
+	}
+
+	feeRate := at.effectiveTakerFeeRate()
+	minNotional := at.minNotionalForSymbol(decision.Symbol)
+
+	// 🔧 动态调整安全缓冲：根据可用余额和AI置信度智能调整
+	// 余额越多，缓冲比例越低；置信度越高，缓冲比例越低
+	var bufferRatio float64
+	
+	// 根据可用余额调整缓冲比例
+	if availableBalance >= 1000 {
+		// 大账户（≥1000 USDT）：使用较小缓冲（5-8%）
+		bufferRatio = 0.05
+	} else if availableBalance >= 500 {
+		// 中等账户（500-1000 USDT）：使用中等缓冲（8-10%）
+		bufferRatio = 0.08
+	} else if availableBalance >= 200 {
+		// 小账户（200-500 USDT）：使用标准缓冲（10%）
+		bufferRatio = 0.10
+	} else {
+		// 很小账户（<200 USDT）：使用较大缓冲（12%）
+		bufferRatio = 0.12
+	}
+	
+	// 根据AI置信度进一步调整缓冲（高置信度时降低缓冲）
+	if decision.Confidence >= 90 {
+		bufferRatio *= 0.8 // 极高置信度：减少20%缓冲
+	} else if decision.Confidence >= 85 {
+		bufferRatio *= 0.9 // 高置信度：减少10%缓冲
+	}
+	
+	// 计算安全缓冲（至少保留5 USDT，但不超过余额的15%）
+	buffer := math.Max(availableBalance*bufferRatio, 5.0)
+	buffer = math.Min(buffer, availableBalance*0.15) // 最多保留15%
+
+	effectiveBalance := availableBalance - buffer
+	if effectiveBalance <= 0 {
+		effectiveBalance = availableBalance * 0.85 // 至少使用85%的余额
+	}
+	if effectiveBalance <= 0 {
+		return "", fmt.Errorf("可用余额 %.2f USDT 无法满足安全缓冲要求", availableBalance)
+	}
+
+	denominator := (1.0 / float64(decision.Leverage)) + feeRate
+	if denominator <= 0 {
+		return "", fmt.Errorf("无效的杠杆或手续费配置")
+	}
+
+	maxPositionUSD := effectiveBalance / denominator
+	if maxPositionUSD < minNotional {
+		return "", fmt.Errorf("可用余额 %.2f USDT 无法满足 %s 最小名义价值 %.2f USDT，请增加余额或降低仓位",
+			availableBalance, decision.Symbol, minNotional)
+	}
+
+	maxPositionUSD = math.Floor(maxPositionUSD*100) / 100 // 保守向下取两位小数
+	if maxPositionUSD < minNotional {
+		maxPositionUSD = minNotional
+	}
+
+	var adjustments []string
+
+	// 🔧 如果AI决策的仓位小于最大可用仓位，且置信度较高，可以适当增加仓位
+	if decision.PositionSizeUSD < maxPositionUSD {
+		// 高置信度时，可以使用更多可用资金（但不超过AI决策的150%）
+		if decision.Confidence >= 85 && maxPositionUSD > decision.PositionSizeUSD*1.5 {
+			// 如果最大可用仓位远大于AI决策，且置信度高，可以适当增加
+			// 但保守起见，只增加到AI决策的120%
+			suggestedSize := decision.PositionSizeUSD * 1.2
+			if suggestedSize <= maxPositionUSD {
+				original := decision.PositionSizeUSD
+				decision.PositionSizeUSD = math.Floor(suggestedSize*100) / 100
+				adjustments = append(adjustments,
+					fmt.Sprintf("高置信度决策，仓位 %.2f→%.2f USDT（充分利用可用余额）", original, decision.PositionSizeUSD))
+			}
+		}
+	}
+
+	if decision.PositionSizeUSD > maxPositionUSD {
+		original := decision.PositionSizeUSD
+		decision.PositionSizeUSD = maxPositionUSD
+		adjustments = append(adjustments,
+			fmt.Sprintf("保证金限制，仓位 %.2f→%.2f USDT（可用余额: %.2f USDT）", original, decision.PositionSizeUSD, availableBalance))
+	}
+
+	if decision.PositionSizeUSD < minNotional {
+		original := decision.PositionSizeUSD
+		decision.PositionSizeUSD = minNotional
+		adjustments = append(adjustments,
+			fmt.Sprintf("提升仓位 %.2f→%.2f USDT 以满足最小名义价值要求", original, decision.PositionSizeUSD))
+	}
+
+	if decision.PositionSizeUSD <= 0 {
+		return "", fmt.Errorf("调整后仓位无效，请检查AI决策")
+	}
+
+	if len(adjustments) > 0 {
+		return strings.Join(adjustments, "；"), nil
+	}
+
+	return "", nil
+}
+
 func (at *AutoTrader) applyRiskGuards(ctx *decision.Context, d *decision.Decision) (bool, string) {
+	if at.disableRiskGuards {
+		return true, ""
+	}
+
 	if ctx == nil || d == nil {
 		return true, ""
 	}
@@ -1722,16 +2085,17 @@ func (at *AutoTrader) applyRiskGuards(ctx *decision.Context, d *decision.Decisio
 		return false, "市场处于极端波动，系统只允许观望或减仓"
 	}
 
-	maxPosition := at.calculateDynamicPositionCap(ctx, d)
-	if maxPosition <= 0 {
-		return false, "风控限制：当前市场状态下禁止开仓"
-	}
+	// 动态上限风控已禁用（用户不需要此限制）
+	// maxPosition := at.calculateDynamicPositionCap(ctx, d)
+	// if maxPosition <= 0 {
+	// 	return false, "风控限制：当前市场状态下禁止开仓"
+	// }
 
-	if d.PositionSizeUSD > maxPosition {
-		original := d.PositionSizeUSD
-		d.PositionSizeUSD = math.Max(maxPosition, 12)
-		return true, fmt.Sprintf("仓位从 %.2f 调整至 %.2f USDT（动态上限）", original, d.PositionSizeUSD)
-	}
+	// if d.PositionSizeUSD > maxPosition {
+	// 	original := d.PositionSizeUSD
+	// 	d.PositionSizeUSD = math.Max(maxPosition, 12)
+	// 	return true, fmt.Sprintf("仓位从 %.2f 调整至 %.2f USDT（动态上限）", original, d.PositionSizeUSD)
+	// }
 
 	return true, ""
 }
@@ -1837,7 +2201,24 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 }
 
 // getCandidateCoins 获取交易员的候选币种列表
+// 🔧 只返回用户选择的币种，不包含其他币种
 func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
+	// 优先使用用户选择的交易币种
+	if len(at.tradingCoins) > 0 {
+		var candidateCoins []decision.CandidateCoin
+		for _, coin := range at.tradingCoins {
+			symbol := normalizeSymbol(coin)
+			candidateCoins = append(candidateCoins, decision.CandidateCoin{
+				Symbol:  symbol,
+				Sources: []string{"user_selected"}, // 标记为用户选择的币种
+			})
+		}
+		log.Printf("📋 [%s] 使用用户选择的交易币种: %d个币种 %v",
+			at.name, len(candidateCoins), at.tradingCoins)
+		return candidateCoins, nil
+	}
+	
+	// 如果没有选择交易币种，才使用默认币种或信号源
 	if len(at.tradingCoins) == 0 {
 		// 使用数据库配置的默认币种列表
 		var candidateCoins []decision.CandidateCoin

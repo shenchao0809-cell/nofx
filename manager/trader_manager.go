@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"nofx/config"
+	"nofx/market"
 	"nofx/trader"
 	"sort"
 	"strconv"
@@ -423,6 +424,13 @@ func (tm *TraderManager) GetTraderIDs() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// GetMarketAPIClient 获取市场数据API客户端
+func (tm *TraderManager) GetMarketAPIClient() *market.APIClient {
+	// 直接创建一个新的APIClient实例用于获取公开市场数据
+	// 这不需要API密钥，因为K线数据是公开的
+	return market.NewAPIClient()
 }
 
 // RemoveTrader 从内存中移除交易员（删除前必须先停止）
@@ -1120,6 +1128,7 @@ func (tm *TraderManager) loadSingleTrader(traderCfg *config.TraderRecord, aiMode
 		OrderStrategy:        traderCfg.OrderStrategy,        // 订单策略
 		LimitPriceOffset:     traderCfg.LimitPriceOffset,     // 限价偏移
 		LimitTimeoutSeconds:  traderCfg.LimitTimeoutSeconds,  // 限价超时
+		Timeframes:           traderCfg.Timeframes,            // K线时间周期配置
 		HyperliquidTestnet:   exchangeCfg.Testnet,            // Hyperliquid测试网
 	}
 

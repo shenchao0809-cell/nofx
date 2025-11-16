@@ -10,7 +10,9 @@ import (
 	"nofx/mcp"
 	"nofx/pool"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -89,21 +91,24 @@ type OITopData struct {
 
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime     string                  `json:"current_time"`
-	RuntimeMinutes  int                     `json:"runtime_minutes"`
-	CallCount       int                     `json:"call_count"`
-	Account         AccountInfo             `json:"account"`
-	Positions       []PositionInfo          `json:"positions"`
-	OpenOrders      []OpenOrderInfo         `json:"open_orders"` // List of open orders for AI context
-	CandidateCoins  []CandidateCoin         `json:"candidate_coins"`
-	MarketDataMap   map[string]*market.Data `json:"-"` // 不序列化，但内部使用
-	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
-	Performance     interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis，包含 RecentTrades）
-	MarketSummary   *MarketSummary          `json:"-"` // 全局市场状态
-	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
-	TakerFeeRate    float64                 `json:"-"` // Taker fee rate (from config, default 0.0004)
-	MakerFeeRate    float64                 `json:"-"` // Maker fee rate (from config, default 0.0002)
+	CurrentTime        string                      `json:"current_time"`
+	RuntimeMinutes     int                         `json:"runtime_minutes"`
+	CallCount          int                         `json:"call_count"`
+	Account            AccountInfo                 `json:"account"`
+	Positions          []PositionInfo              `json:"positions"`
+	OpenOrders         []OpenOrderInfo             `json:"open_orders"` // List of open orders for AI context
+	CandidateCoins     []CandidateCoin             `json:"candidate_coins"`
+	MarketDataMap      map[string]*market.Data                `json:"-"` // 不序列化，但内部使用
+	OITopDataMap       map[string]*OITopData                   `json:"-"` // OI Top数据映射
+	Performance        interface{}                            `json:"-"` // 历史表现分析（logger.PerformanceAnalysis，包含 RecentTrades）
+	MarketSummary      *MarketSummary                          `json:"-"` // 全局市场状态
+	PatternAnalysisMap map[string]*PatternAnalysis             `json:"-"` // K线形态分析映射 (symbol -> analysis) [已废弃，保留兼容性]
+	MultiTimeframeAnalysisMap map[string]map[string]*PatternAnalysis `json:"-"` // 多时间周期K线形态分析映射 (symbol -> interval -> analysis)
+	Timeframes         []string                                `json:"-"` // 配置的时间周期列表（例如：["1m", "3m", "1h", "4h", "1d"]）
+	BTCETHLeverage     int                                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage    int                                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	TakerFeeRate       float64                                 `json:"-"` // Taker fee rate (from config, default 0.0004)
+	MakerFeeRate       float64                                 `json:"-"` // Maker fee rate (from config, default 0.0002)
 }
 
 // Decision AI的交易决策
@@ -146,11 +151,23 @@ func GetFullDecision(ctx *Context, mcpClient mcp.AIClient) (*FullDecision, error
 
 // GetFullDecisionWithCustomPrompt 获取AI的完整交易决策（支持自定义prompt和模板选择）
 func GetFullDecisionWithCustomPrompt(ctx *Context, mcpClient mcp.AIClient, customPrompt string, overrideBase bool, templateName string) (*FullDecision, error) {
-	// 1. 为所有币种获取市场数据
+	// 1. 为所有币种获取最新市场数据（确保使用最新数据）
+	log.Printf("📊 [决策] 开始获取最新市场数据...")
 	if err := fetchMarketDataForContext(ctx); err != nil {
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
 	}
+	
+	// 记录BTC当前价格（用于确认数据是最新的）
+	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
+		log.Printf("📊 [决策] BTC当前价格: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f",
+			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
+			btcData.CurrentMACD, btcData.CurrentRSI7)
+	}
+	
 	ctx.MarketSummary = analyzeMarketSummary(ctx)
+	
+	// 2. 获取K线形态分析（异步，不阻塞主流程）
+	fetchPatternAnalysisForContext(ctx)
 
 	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
 	systemPrompt := buildSystemPromptWithCustom(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, customPrompt, overrideBase, templateName)
@@ -185,6 +202,151 @@ func GetFullDecisionWithCustomPrompt(ctx *Context, mcpClient mcp.AIClient, custo
 	return decision, nil
 }
 
+// fetchPatternAnalysisForContext 为上下文中的币种获取K线形态分析
+// ⚡ 关键修复：使用 MarketDataMap 中已获取的K线数据，确保与价格数据同步
+func fetchPatternAnalysisForContext(ctx *Context) {
+	ctx.PatternAnalysisMap = make(map[string]*PatternAnalysis)
+	ctx.MultiTimeframeAnalysisMap = make(map[string]map[string]*PatternAnalysis)
+
+	// 确定要分析的时间周期（从配置获取，如果没有则使用默认值）
+	timeframes := ctx.Timeframes
+	if len(timeframes) == 0 {
+		// 默认时间周期（包含15分钟线）
+		timeframes = []string{"15m", "1h", "4h"}
+		log.Printf("⚠️ 未配置时间周期，使用默认值: %v", timeframes)
+	} else {
+		log.Printf("📊 使用配置的时间周期进行分析: %v（共%d个时间周期）", timeframes, len(timeframes))
+	}
+	
+	// 收集需要分析的币种（BTCUSDT + 所有持仓 + 用户选择的币种）
+	symbolsToAnalyze := make(map[string]bool)
+	
+	// 0. 强制分析BTCUSDT（用于市场概览和决策参考）
+	symbolsToAnalyze["BTCUSDT"] = true
+	
+	// 1. 持仓币种
+	for _, pos := range ctx.Positions {
+		symbolsToAnalyze[pos.Symbol] = true
+	}
+	
+	// 2. 用户选择的币种（只分析用户配置的币种）
+	for _, coin := range ctx.CandidateCoins {
+		symbolsToAnalyze[coin.Symbol] = true
+	}
+	
+	// 辅助函数：获取币种列表用于日志
+	symbolList := make([]string, 0, len(symbolsToAnalyze))
+	for symbol := range symbolsToAnalyze {
+		symbolList = append(symbolList, symbol)
+	}
+	log.Printf("📊 需要分析的币种: %v（共%d个币种）", symbolList, len(symbolsToAnalyze))
+	
+	// 并发分析K线形态（多时间周期）
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	apiClient := market.NewAPIClient()
+	
+	for symbol := range symbolsToAnalyze {
+		// 为每个币种初始化多时间周期分析map
+		mu.Lock()
+		ctx.MultiTimeframeAnalysisMap[symbol] = make(map[string]*PatternAnalysis)
+		mu.Unlock()
+
+		// 为每个时间周期进行分析
+		for _, interval := range timeframes {
+		wg.Add(1)
+			go func(sym string, tf string) {
+			defer wg.Done()
+			
+				// 获取K线数据
+				var klines []market.Kline
+				var err error
+
+				// 对于1小时周期，优先使用已获取的数据
+				if tf == "1h" {
+					if marketData, hasData := ctx.MarketDataMap[sym]; hasData && len(marketData.RawKlines1h) > 0 {
+						klines = marketData.RawKlines1h
+						log.Printf("✓ [K线形态] %s %s 使用已获取的K线数据（%d根）", sym, tf, len(klines))
+					} else {
+						klines, err = apiClient.GetKlines(sym, tf, 100)
+			if err != nil {
+							log.Printf("⚠️ 获取%s %s K线数据失败: %v", sym, tf, err)
+							return
+						}
+					}
+				} else {
+					// 其他时间周期直接从API获取
+					klines, err = apiClient.GetKlines(sym, tf, 100)
+					if err != nil {
+						log.Printf("⚠️ 获取%s %s K线数据失败: %v", sym, tf, err)
+						return
+					}
+				}
+
+				if len(klines) < 20 {
+					log.Printf("⚠️ %s %s K线数据不足（%d根），跳过形态分析", sym, tf, len(klines))
+				return
+			}
+			
+			// 进行形态分析
+				analysis := AnalyzeKlinePatterns(klines, sym, tf)
+			
+			// 安全地写入map
+			mu.Lock()
+				ctx.MultiTimeframeAnalysisMap[sym][tf] = analysis
+				// 兼容性：如果是1小时周期，也写入旧的PatternAnalysisMap
+				if tf == "1h" {
+			ctx.PatternAnalysisMap[sym] = analysis
+				}
+			mu.Unlock()
+			
+				log.Printf("✓ %s %s K线形态分析完成: %s", sym, tf, analysis.Summary)
+			}(symbol, interval)
+		}
+	}
+	
+	// 等待所有分析完成（最多等待5秒，避免阻塞决策）
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	
+	select {
+	case <-done:
+		totalAnalyses := 0
+		for _, analyses := range ctx.MultiTimeframeAnalysisMap {
+			totalAnalyses += len(analyses)
+		}
+		log.Printf("✓ 多时间周期K线形态分析完成，共分析%d个币种，%d个时间周期", len(ctx.MultiTimeframeAnalysisMap), totalAnalyses)
+		// 详细日志：显示每个币种分析了哪些时间周期
+		for symbol, analyses := range ctx.MultiTimeframeAnalysisMap {
+			intervals := make([]string, 0, len(analyses))
+			for interval := range analyses {
+				intervals = append(intervals, interval)
+			}
+			// 按时间周期排序显示
+			sort.Strings(intervals)
+			log.Printf("  • %s: %v", symbol, intervals)
+		}
+	case <-time.After(5 * time.Second):
+		totalAnalyses := 0
+		for _, analyses := range ctx.MultiTimeframeAnalysisMap {
+			totalAnalyses += len(analyses)
+		}
+		log.Printf("⚠️ K线形态分析超时，已完成%d个币种，%d个时间周期", len(ctx.MultiTimeframeAnalysisMap), totalAnalyses)
+		// 详细日志：显示每个币种分析了哪些时间周期
+		for symbol, analyses := range ctx.MultiTimeframeAnalysisMap {
+			intervals := make([]string, 0, len(analyses))
+			for interval := range analyses {
+				intervals = append(intervals, interval)
+			}
+			sort.Strings(intervals)
+			log.Printf("  • %s: %v", symbol, intervals)
+		}
+	}
+}
+
 // fetchMarketDataForContext 为上下文中的所有币种获取市场数据和OI数据
 func fetchMarketDataForContext(ctx *Context) error {
 	ctx.MarketDataMap = make(map[string]*market.Data)
@@ -192,6 +354,10 @@ func fetchMarketDataForContext(ctx *Context) error {
 
 	// 收集所有需要获取数据的币种
 	symbolSet := make(map[string]bool)
+
+	// 0. 强制获取BTCUSDT数据（用于决策提示词中的市场概览）
+	// 无论BTC是否在持仓或候选列表中，都需要获取最新数据
+	symbolSet["BTCUSDT"] = true
 
 	// 1. 优先获取持仓币种的数据（这是必须的）
 	for _, pos := range ctx.Positions {
@@ -215,10 +381,18 @@ func fetchMarketDataForContext(ctx *Context) error {
 	}
 
 	for symbol := range symbolSet {
-		data, err := market.Get(symbol)
+		// ⚡ 关键修复：AI决策时强制从API获取最新数据，不使用WebSocket缓存
+		// 确保AI决策基于最新的实时价格
+		data, err := market.GetFresh(symbol)
 		if err != nil {
-			// 单个币种失败不影响整体，只记录错误
-			continue
+			// 如果GetFresh失败，回退到Get（使用WebSocket缓存）
+			log.Printf("⚠️  [决策] GetFresh失败，回退到Get: %v", err)
+			data, err = market.Get(symbol)
+			if err != nil {
+				// 单个币种失败不影响整体，只记录错误
+				log.Printf("❌ [决策] 获取 %s 市场数据失败: %v", symbol, err)
+				continue
+			}
 		}
 
 		// ⚠️ 流动性过滤：持仓价值低于阈值的币种不做（多空都不做）
@@ -228,7 +402,10 @@ func fetchMarketDataForContext(ctx *Context) error {
 		const minOIThresholdMillions = 15.0 // 可調整：15M(保守) / 10M(平衡) / 8M(寬鬆) / 5M(激進)
 
 		isExistingPosition := positionSymbols[symbol]
-		if !isExistingPosition && data.OpenInterest != nil && data.CurrentPrice > 0 {
+		isBTCUSDT := symbol == "BTCUSDT" // BTCUSDT必须保留，用于市场概览
+		
+		// 流动性过滤：跳过非持仓且非BTCUSDT的币种
+		if !isExistingPosition && !isBTCUSDT && data.OpenInterest != nil && data.CurrentPrice > 0 {
 			// 计算持仓价值（USD）= 持仓量 × 当前价格
 			oiValue := data.OpenInterest.Latest * data.CurrentPrice
 			oiValueInMillions := oiValue / 1_000_000 // 转换为百万美元单位
@@ -353,8 +530,12 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 		accountEquity*2.5, accountEquity*5, accountEquity*5, accountEquity*10))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
 	sb.WriteString("5. 保证金: 总使用率 ≤ 90%\n")
+	sb.WriteString("6. **决策稳定性要求（⚠️ 严格执行）**：\n")
+	sb.WriteString("   - **开仓置信度必须≥80（建议≥85）**：如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓\n")
+	sb.WriteString("   - **风险回报比必须≥3:1**：确保决策质量和稳定性\n")
+	sb.WriteString("   - ⚠️ **违反以上要求将导致决策被拒绝，请严格遵守**\n")
 
-	// 6. 开仓金额：根据账户规模动态提示（使用统一的配置规则）
+	// 7. 开仓金额：根据账户规模动态提示（使用统一的配置规则）
 	minBTCETH := calculateMinPositionSize("BTCUSDT", accountEquity)
 
 	// 根据账户规模生成不同的提示语
@@ -370,17 +551,22 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 		btcEthHint = fmt.Sprintf(" | BTC/ETH≥%.0f USDT", minBTCETH)
 	}
 
-	sb.WriteString("6. 开仓金额: 山寨币≥12 USDT")
+	sb.WriteString("7. 开仓金额: 山寨币≥12 USDT")
 	sb.WriteString(btcEthHint)
 	sb.WriteString("\n\n")
 
 	// ⚠️ 重要提醒：防止 AI 误读市场数据中的数字
 	sb.WriteString("⚠️ **重要提醒：计算 position_size_usd 的正确方法**\n\n")
 	sb.WriteString(fmt.Sprintf("- 当前账户净值：**%.2f USDT**\n", accountEquity))
-	sb.WriteString(fmt.Sprintf("- 山寨币开仓范围：**%.0f - %.0f USDT** (净值的 2.5-5 倍)\n", accountEquity*2.5, accountEquity*5))
-	sb.WriteString(fmt.Sprintf("- BTC/ETH开仓范围：**%.0f - %.0f USDT** (净值的 5-10 倍)\n", accountEquity*5, accountEquity*10))
+	sb.WriteString(fmt.Sprintf("- 可用余额：**%.2f USDT**（系统会自动计算）\n", accountEquity*0.9)) // 假设90%可用
+	sb.WriteString(fmt.Sprintf("- 山寨币开仓范围：**%.0f - %.0f USDT** (净值的 2.5-5 倍，建议使用中上值)\n", accountEquity*2.5, accountEquity*5))
+	sb.WriteString(fmt.Sprintf("- BTC/ETH开仓范围：**%.0f - %.0f USDT** (净值的 5-10 倍，建议使用中上值)\n", accountEquity*5, accountEquity*10))
+	sb.WriteString("- ⚠️ **不要使用最小值**：避免使用范围下限，建议使用中上值（如山寨币用3.5-4.5倍，BTC/ETH用7-9倍）\n")
+	sb.WriteString("- ✅ **如果可用余额充足（>账户净值的50%），应该充分利用可用余额，使用更大的仓位和更高的杠杆**\n")
+	sb.WriteString("- ✅ **高置信度（≥85）时，可以使用接近上限的仓位和杠杆，充分利用可用资金**\n")
+	sb.WriteString("- ⚠️ **置信度要求（严格执行）**：开仓时 `confidence` 必须≥80，如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓\n")
 	sb.WriteString("- ❌ **不要使用市场数据中的任何数字**（如 Open Interest 合约数、Volume、价格等）作为 position_size_usd\n")
-	sb.WriteString("- ✅ **position_size_usd 必须根据账户净值和上述范围计算**\n\n")
+	sb.WriteString("- ✅ **position_size_usd 必须根据账户净值和上述范围计算，优先使用中上值而非最小值**\n\n")
 
 	// 3. 输出格式 - 动态生成
 	sb.WriteString("# 输出格式 (严格遵守)\n\n")
@@ -392,14 +578,15 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("</reasoning>\n\n")
 	sb.WriteString("<decision>\n")
 	sb.WriteString("```json\n[\n")
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉+多重确认\"},\n", btcEthLeverage, accountEquity*7.5)) // 使用中上值，置信度85确保稳定性
+	sb.WriteString("  // ⚠️ 注意：如果置信度<80，必须使用 \"action\": \"wait\" 而不是开仓\n")
 	sb.WriteString("  {\"symbol\": \"SOLUSDT\", \"action\": \"update_stop_loss\", \"new_stop_loss\": 155, \"reasoning\": \"移动止损至保本位\"},\n")
 	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
 	sb.WriteString("]\n```\n")
 	sb.WriteString("</decision>\n\n")
 	sb.WriteString("## 字段说明\n\n")
 	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | update_stop_loss | update_take_profit | partial_close | hold | wait\n")
-	sb.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
+	sb.WriteString("- `confidence`: 0-100（⚠️ **开仓必须≥80，建议≥85**；如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓）\n")
 	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n")
 	sb.WriteString("- update_stop_loss 时必填: new_stop_loss (注意是 new_stop_loss，不是 stop_loss)\n")
 	sb.WriteString("- update_take_profit 时必填: new_take_profit (注意是 new_take_profit，不是 take_profit)\n")
@@ -426,21 +613,68 @@ func buildUserPrompt(ctx *Context) string {
 	sb.WriteString(fmt.Sprintf("时间: %s | 周期: #%d | 运行: %d分钟\n\n",
 		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
 
-	// BTC 市场
+	// BTC 市场（多时间周期分析）
 	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		sb.WriteString(fmt.Sprintf("BTC: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
+		price := btcData.RealtimePrice
+		if price <= 0 {
+			price = btcData.CurrentPrice
+		}
+		sb.WriteString(fmt.Sprintf("BTC: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n",
+			price, btcData.PriceChange1h, btcData.PriceChange4h,
 			btcData.CurrentMACD, btcData.CurrentRSI7))
+		
+		// 添加BTC的多时间周期K线形态分析（完整详细信息）
+		if btcAnalyses, hasBTCAnalyses := ctx.MultiTimeframeAnalysisMap["BTCUSDT"]; hasBTCAnalyses && len(btcAnalyses) > 0 {
+			sb.WriteString("\n### BTC 多时间周期K线形态分析\n\n")
+			
+			// 按时间周期排序显示（短周期到长周期）
+			intervalOrder := []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+			for _, interval := range intervalOrder {
+				if analysis, exists := btcAnalyses[interval]; exists {
+					// 使用FormatForPrompt显示完整的形态分析（包括所有形态、支撑位、阻力位等）
+					sb.WriteString(analysis.FormatForPrompt())
+					
+					// 添加K线可视化（对关键时间周期：1m, 15m, 1h, 4h, 1d）
+					if interval == "1m" || interval == "15m" || interval == "1h" || interval == "4h" || interval == "1d" {
+						// 获取K线数据用于可视化
+						apiClient := market.NewAPIClient()
+						klines, err := apiClient.GetKlines("BTCUSDT", interval, 50) // 获取最近50根用于可视化
+						if err == nil && len(klines) > 0 {
+							visualization := FormatKlineVisualization(klines, "BTCUSDT", interval, 50)
+							if visualization != "" {
+								sb.WriteString(visualization)
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// 兼容性：如果没有多时间周期分析，使用旧的单时间周期分析
+		if btcPatternAnalysis, hasBTCPattern := ctx.PatternAnalysisMap["BTCUSDT"]; hasBTCPattern {
+				sb.WriteString(btcPatternAnalysis.FormatForPrompt())
+			}
+		}
+		
+		sb.WriteString("\n")
 	}
 
 	// 账户
-	sb.WriteString(fmt.Sprintf("账户: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
+	availableBalancePct := (ctx.Account.AvailableBalance / ctx.Account.TotalEquity) * 100
+	sb.WriteString(fmt.Sprintf("账户: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n",
 		ctx.Account.TotalEquity,
 		ctx.Account.AvailableBalance,
-		(ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
+		availableBalancePct,
 		ctx.Account.TotalPnLPct,
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
+	
+	// 🔧 如果可用余额充足，提示AI使用更大的仓位
+	if availableBalancePct > 50 {
+		sb.WriteString(fmt.Sprintf("💡 **可用余额充足（%.1f%%），建议充分利用可用资金，使用更大的仓位和更高的杠杆**\n", availableBalancePct))
+	} else if availableBalancePct > 30 {
+		sb.WriteString(fmt.Sprintf("💡 **可用余额较多（%.1f%%），可以使用中上值的仓位和杠杆**\n", availableBalancePct))
+	}
+	sb.WriteString("\n")
 
 	// 市场状态概览
 	if ctx.MarketSummary != nil {
@@ -510,15 +744,67 @@ func buildUserPrompt(ctx *Context) string {
 
 			// 使用FormatMarketData输出完整市场数据
 			if marketData, ok := ctx.MarketDataMap[pos.Symbol]; ok {
+				// 添加简洁格式的市场指标（类似BTC的显示格式）
+				price := marketData.RealtimePrice
+				if price <= 0 {
+					price = marketData.CurrentPrice
+				}
+				sb.WriteString(fmt.Sprintf("%s: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
+					pos.Symbol, price, marketData.PriceChange1h, marketData.PriceChange4h,
+					marketData.CurrentMACD, marketData.CurrentRSI7))
+				
 				sb.WriteString(market.Format(marketData))
 				sb.WriteString("\n")
+			}
+
+			// 添加多时间周期K线形态分析（完整详细信息 + K线可视化）
+			if analyses, hasAnalyses := ctx.MultiTimeframeAnalysisMap[pos.Symbol]; hasAnalyses && len(analyses) > 0 {
+				sb.WriteString("\n#### 多时间周期K线形态分析（重点关注持仓币种的K线状态）\n\n")
+				sb.WriteString("**重要提示**: 请仔细分析该持仓币种在各个时间周期的K线形态，结合当前持仓方向和盈亏情况，判断是否需要调整止损止盈、加仓或减仓。\n\n")
+				
+				intervalOrder := []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+				for _, interval := range intervalOrder {
+					if analysis, exists := analyses[interval]; exists {
+						// 使用FormatForPrompt显示完整的形态分析（包括所有形态、支撑位、阻力位等）
+						sb.WriteString(analysis.FormatForPrompt())
+						
+						// 为关键时间周期添加K线可视化数据（让AI能够更直观地看到K线状态）
+						if interval == "1m" || interval == "1h" || interval == "4h" || interval == "1d" {
+							// 获取K线数据用于可视化
+							apiClient := market.NewAPIClient()
+							klines, err := apiClient.GetKlines(pos.Symbol, interval, 50) // 获取最近50根用于可视化
+							if err == nil && len(klines) > 0 {
+								visualization := FormatKlineVisualization(klines, pos.Symbol, interval, 50)
+								if visualization != "" {
+									sb.WriteString(visualization)
+								}
+							}
+						}
+					}
+				}
+				
+				// 添加持仓决策提示
+				sb.WriteString("\n**持仓决策建议**:\n")
+				sb.WriteString("请基于以上多时间周期K线分析，综合考虑：\n")
+				sb.WriteString("1. 短期（1m, 3m, 5m）和中期（1h, 4h）趋势是否一致？\n")
+				sb.WriteString("2. 当前价格是否接近关键支撑位或阻力位？\n")
+				sb.WriteString("3. K线形态是否显示反转信号？\n")
+				sb.WriteString("4. 是否需要调整止损止盈位置？\n")
+				sb.WriteString("5. 是否应该加仓、减仓或平仓？\n\n")
+			} else {
+				// 兼容性：如果没有多时间周期分析，使用旧的单时间周期分析
+			if patternAnalysis, hasPattern := ctx.PatternAnalysisMap[pos.Symbol]; hasPattern {
+				sb.WriteString("\n")
+				sb.WriteString(patternAnalysis.FormatForPrompt())
+				sb.WriteString("\n")
+				}
 			}
 		}
 	} else {
 		sb.WriteString("当前持仓: 无\n\n")
 	}
 
-	// 候选币种（完整市场数据）
+	// 候选币种（完整市场数据 + K线形态分析）
 	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
 	displayedCount := 0
 	for _, coin := range ctx.CandidateCoins {
@@ -537,7 +823,49 @@ func buildUserPrompt(ctx *Context) string {
 
 		// 使用FormatMarketData输出完整市场数据
 		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
+		
+		// 添加简洁格式的市场指标（类似BTC的显示格式）
+		price := marketData.RealtimePrice
+		if price <= 0 {
+			price = marketData.CurrentPrice
+		}
+		sb.WriteString(fmt.Sprintf("%s: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
+			coin.Symbol, price, marketData.PriceChange1h, marketData.PriceChange4h,
+			marketData.CurrentMACD, marketData.CurrentRSI7))
+		
 		sb.WriteString(market.Format(marketData))
+		
+		// 添加多时间周期K线形态分析（完整详细信息 + K线可视化）
+		if analyses, hasAnalyses := ctx.MultiTimeframeAnalysisMap[coin.Symbol]; hasAnalyses && len(analyses) > 0 {
+			sb.WriteString("\n#### 多时间周期K线形态分析\n\n")
+			intervalOrder := []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+			for _, interval := range intervalOrder {
+				if analysis, exists := analyses[interval]; exists {
+					// 使用FormatForPrompt显示完整的形态分析（包括所有形态、支撑位、阻力位等）
+					sb.WriteString(analysis.FormatForPrompt())
+					
+					// 为关键时间周期添加K线可视化数据
+					if interval == "1m" || interval == "1h" || interval == "4h" || interval == "1d" {
+						// 获取K线数据用于可视化
+						apiClient := market.NewAPIClient()
+						klines, err := apiClient.GetKlines(coin.Symbol, interval, 50) // 获取最近50根用于可视化
+						if err == nil && len(klines) > 0 {
+							visualization := FormatKlineVisualization(klines, coin.Symbol, interval, 50)
+							if visualization != "" {
+								sb.WriteString(visualization)
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// 兼容性：如果没有多时间周期分析，使用旧的单时间周期分析
+		if patternAnalysis, hasPattern := ctx.PatternAnalysisMap[coin.Symbol]; hasPattern {
+			sb.WriteString("\n")
+			sb.WriteString(patternAnalysis.FormatForPrompt())
+			}
+		}
+		
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
@@ -970,6 +1298,11 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 
 	// 开仓操作必须提供完整参数
 	if d.Action == "open_long" || d.Action == "open_short" {
+		// ✅ 稳定性检查1：置信度验证（提高要求以确保决策稳定性）
+		if d.Confidence < 80 {
+			return fmt.Errorf("置信度过低(%d)，开仓必须≥80以确保决策稳定性（建议≥85）", d.Confidence)
+		}
+
 		// 根据币种使用配置的杠杆上限
 		maxLeverage := altcoinLeverage        // 山寨币使用配置的杠杆
 		maxPositionValue := accountEquity * 5 // 山寨币最多5倍账户净值
@@ -1055,9 +1388,9 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			}
 		}
 
-		// 硬约束：风险回报比必须≥3.0
+		// ✅ 稳定性检查2：风险回报比必须≥3.0（硬约束）
 		if riskRewardRatio < 3.0 {
-			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥3.0:1 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
+			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥3.0:1以确保决策稳定性 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
 				riskRewardRatio, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
 		}
 	}
