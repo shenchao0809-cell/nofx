@@ -8,11 +8,6 @@ $(date '+%Y-%m-%d %H:%M:%S %Z')
 - **来源分支**: the-dev-z/nofx (z-dev-v2)
 - **构建时间**: $(date '+%Y-%m-%d %H:%M:%S')
 
-## 🌐 访问地址
-- **主域名**: https://fafafacai.top
-- **备用域名**: https://www.fafafacai.top
-- **API 地址**: https://fafafacai.top/api/
-
 ## 🔧 服务状态
 - ✅ 后端服务: nofx-backend.service (systemd 管理)
 - ✅ 前端服务: nofx-frontend.service (systemd 管理)
@@ -49,7 +44,7 @@ systemctl reload nginx
 \`\`\`bash
 tail -f /root/nofx/nofx-server.log
 tail -f /root/nofx/web/web-server.log
-tail -f /var/log/nginx/fafafacai.top.access.log
+tail -f /var/log/nginx/access.log
 \`\`\`
 
 ### 更新代码
@@ -63,10 +58,9 @@ systemctl restart nofx-backend nofx-frontend
 \`\`\`
 
 ## 📊 系统监控
-- **服务器 IP**: 103.145.107.64
 - **后端端口**: 8080 (内部)
 - **前端端口**: 4173 (内部)
 - **Nginx 端口**: 80, 443 (公开)
 
 ## ✅ 部署完成
-系统已成功部署到生产环境，可通过 https://fafafacai.top 直接访问。
+系统已成功部署到生产环境。
