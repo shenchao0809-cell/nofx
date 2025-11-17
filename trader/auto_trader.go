@@ -402,6 +402,9 @@ func (at *AutoTrader) runCycle() error {
 		autoCloseActions := at.generateAutoCloseActions(closedPositions)
 		record.Decisions = append(record.Decisions, autoCloseActions...)
 		log.Printf("🔔 检测到 %d 个被动平仓", len(closedPositions))
+		
+		// 构建最近被止盈止损触发的持仓信息，传递给AI决策上下文
+		var recentClosedPositions []decision.ClosedPositionInfo
 		for i, closed := range closedPositions {
 			action := autoCloseActions[i]
 			pnl := closed.Quantity * (closed.MarkPrice - closed.EntryPrice)
@@ -429,7 +432,27 @@ func (at *AutoTrader) runCycle() error {
 				action.Price, // 使用推断的平仓价格
 				pnlPct,
 				reasonCN)
+			
+			// 只记录止盈止损触发的持仓（不包括强平和未知原因）
+			if action.Error == "stop_loss" || action.Error == "take_profit" {
+				recentClosedPositions = append(recentClosedPositions, decision.ClosedPositionInfo{
+					Symbol:      closed.Symbol,
+					Side:        closed.Side,
+					EntryPrice:  closed.EntryPrice,
+					ClosePrice:  action.Price,
+					Quantity:    closed.Quantity,
+					Leverage:    closed.Leverage,
+					PnLPct:      pnlPct,
+					CloseReason: action.Error,
+				})
+			}
 		}
+		
+		// 将最近被止盈止损触发的持仓信息添加到决策上下文
+		ctx.RecentClosedPositions = recentClosedPositions
+	} else {
+		// 如果没有被动平仓，清空列表
+		ctx.RecentClosedPositions = []decision.ClosedPositionInfo{}
 	}
 
 	log.Print(strings.Repeat("=", 70))
@@ -567,48 +590,10 @@ func (at *AutoTrader) runCycle() error {
 			Reason:    d.Reasoning,
 		}
 
-		if (d.Action == "hold" || d.Action == "wait") && (d.NewStopLoss > 0 || d.NewTakeProfit > 0) {
-			if d.NewStopLoss > 0 {
-				updateDecision := d
-				updateDecision.Action = "update_stop_loss"
-				updateRecord := logger.DecisionAction{
-					Action:    "update_stop_loss",
-					Symbol:    d.Symbol,
-					Leverage:  d.Leverage,
-					Timestamp: time.Now(),
-					Reason:    fmt.Sprintf("AUTO: %s", d.Reasoning),
-				}
-				if err := at.executeUpdateStopLossWithRecord(&updateDecision, &updateRecord); err != nil {
-					log.Printf("❌ HOLD指令中的止损调整失败 (%s): %v", d.Symbol, err)
-					updateRecord.Error = err.Error()
-					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("❌ AUTO update_stop_loss %s 失败: %v", d.Symbol, err))
-				} else {
-					updateRecord.Success = true
-					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("✓ AUTO update_stop_loss %s 成功", d.Symbol))
-				}
-				record.Decisions = append(record.Decisions, updateRecord)
-			}
-			if d.NewTakeProfit > 0 {
-				updateDecision := d
-				updateDecision.Action = "update_take_profit"
-				updateRecord := logger.DecisionAction{
-					Action:    "update_take_profit",
-					Symbol:    d.Symbol,
-					Leverage:  d.Leverage,
-					Timestamp: time.Now(),
-					Reason:    fmt.Sprintf("AUTO: %s", d.Reasoning),
-				}
-				if err := at.executeUpdateTakeProfitWithRecord(&updateDecision, &updateRecord); err != nil {
-					log.Printf("❌ HOLD指令中的止盈调整失败 (%s): %v", d.Symbol, err)
-					updateRecord.Error = err.Error()
-					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("❌ AUTO update_take_profit %s 失败: %v", d.Symbol, err))
-				} else {
-					updateRecord.Success = true
-					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("✓ AUTO update_take_profit %s 成功", d.Symbol))
-				}
-				record.Decisions = append(record.Decisions, updateRecord)
-			}
-		}
+		// ⚠️ 移除自动调整止盈止损的逻辑
+		// 只有AI明确给出 update_stop_loss 或 update_take_profit 动作时才会调整
+		// 如果AI在 hold/wait 中提供了 NewStopLoss/NewTakeProfit，系统会忽略，不会自动执行
+		// 这样确保只有AI决策才能决定止盈止损
 
 		allowed, note := at.applyRiskGuards(ctx, &d)
 		if !allowed {
@@ -829,10 +814,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:      positionInfos,
-		OpenOrders:     openOrders, // 添加未成交订单（用于 AI 了解挂单状态，避免重复下单）
-		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析（包含 RecentTrades 用于 AI 学习）
+		Positions:            positionInfos,
+		OpenOrders:           openOrders, // 添加未成交订单（用于 AI 了解挂单状态，避免重复下单）
+		RecentClosedPositions: []decision.ClosedPositionInfo{}, // 初始化为空，在检测到被动平仓时填充
+		CandidateCoins:       candidateCoins,
+		Performance:          performance, // 添加历史表现分析（包含 RecentTrades 用于 AI 学习）
 	}
 
 	return ctx, nil
@@ -894,7 +880,13 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		availableBalance = avail
 	}
 
-	adjustMsg, err := at.normalizePositionSize(decision, availableBalance)
+	// 获取当前持仓数量，用于智能分配资金
+	positionCount := 0
+	if positions != nil {
+		positionCount = len(positions)
+	}
+	
+	adjustMsg, err := at.normalizePositionSize(decision, availableBalance, positionCount)
 	if err != nil {
 		return fmt.Errorf("❌ %s", err.Error())
 	}
@@ -947,17 +939,14 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	posKey := decision.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
-	// 设置止损止盈
+	// 只设置止损，不设置止盈（让利润持续累积，通过移动止损来保护利润）
 	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	} else {
 		at.positionStopLoss[posKey] = decision.StopLoss // 记录止损价格
+		log.Printf("  ✓ 止损已设置: %.2f（不设置止盈，让利润持续累积）", decision.StopLoss)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	} else {
-		at.positionTakeProfit[posKey] = decision.TakeProfit // 记录止盈价格
-	}
+	// ⚠️ 不设置止盈单：让利润持续累积，通过移动止损来保护利润（兜底止盈）
 
 	return nil
 }
@@ -993,7 +982,10 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		availableBalance = avail
 	}
 
-	adjustMsg, err := at.normalizePositionSize(decision, availableBalance)
+	// 获取当前持仓数量，用于智能分配资金
+	positionCount := len(positions)
+	
+	adjustMsg, err := at.normalizePositionSize(decision, availableBalance, positionCount)
 	if err != nil {
 		return fmt.Errorf("❌ %s", err.Error())
 	}
@@ -1045,17 +1037,14 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	posKey := decision.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
-	// 设置止损止盈
+	// 只设置止损，不设置止盈（让利润持续累积，通过移动止损来保护利润）
 	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	} else {
 		at.positionStopLoss[posKey] = decision.StopLoss // 记录止损价格
+		log.Printf("  ✓ 止损已设置: %.2f（不设置止盈，让利润持续累积）", decision.StopLoss)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	} else {
-		at.positionTakeProfit[posKey] = decision.TakeProfit // 记录止盈价格
-	}
+	// ⚠️ 不设置止盈单：让利润持续累积，通过移动止损来保护利润（兜底止盈）
 
 	return nil
 }
@@ -1947,7 +1936,8 @@ func (at *AutoTrader) effectiveTakerFeeRate() float64 {
 }
 
 // normalizePositionSize 根据可用保证金与最小名义价值自动调整仓位
-func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availableBalance float64) (string, error) {
+// positionCount: 当前持仓数量，用于智能分配资金，确保可以开3-4单
+func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availableBalance float64, positionCount int) (string, error) {
 	if availableBalance <= 0 {
 		return "", fmt.Errorf("可用余额 %.2f USDT 无法开仓", availableBalance)
 	}
@@ -1959,40 +1949,70 @@ func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availab
 	feeRate := at.effectiveTakerFeeRate()
 	minNotional := at.minNotionalForSymbol(decision.Symbol)
 
-	// 🔧 优化安全缓冲：降低缓冲比例，确保可以开多单
-	// 调整策略：减少缓冲，让更多资金可用于开仓，同时保持基本安全
-	var bufferRatio float64
+	// 🔧 智能资金分配策略：根据持仓数量分配资金，确保可以开3-4单
+	// 目标：每个仓位占用合理比例，避免单仓占用过多资金
+	var allocationRatio float64 // 分配给当前新仓位的资金比例
 	
-	// 根据可用余额调整缓冲比例（降低缓冲，增加可用资金）
-	if availableBalance >= 1000 {
-		// 大账户（≥1000 USDT）：使用最小缓冲（3-5%）
-		bufferRatio = 0.03
-	} else if availableBalance >= 500 {
-		// 中等账户（500-1000 USDT）：使用较小缓冲（5-7%）
-		bufferRatio = 0.05
-	} else if availableBalance >= 200 {
-		// 小账户（200-500 USDT）：使用中等缓冲（7-9%）
-		bufferRatio = 0.07
-	} else {
-		// 很小账户（<200 USDT）：使用标准缓冲（10%）
-		bufferRatio = 0.10
+	switch positionCount {
+	case 0:
+		// 无持仓：可以分配30-35%的可用余额给新仓位
+		allocationRatio = 0.32
+	case 1:
+		// 已有1个持仓：分配25-30%给新仓位
+		allocationRatio = 0.28
+	case 2:
+		// 已有2个持仓：分配20-25%给新仓位
+		allocationRatio = 0.23
+	case 3:
+		// 已有3个持仓：分配15-20%给新仓位
+		allocationRatio = 0.18
+	case 4:
+		// 已有4个持仓：分配12-15%给新仓位
+		allocationRatio = 0.14
+	case 5:
+		// 已有5个持仓：分配10-12%给新仓位（接近上限）
+		allocationRatio = 0.11
+	default:
+		// 超过5个持仓：保守分配10%
+		allocationRatio = 0.10
 	}
 	
-	// 根据AI置信度进一步调整缓冲（高置信度时降低缓冲）
+	// 根据AI置信度调整分配比例（高置信度时可以适当增加）
 	if decision.Confidence >= 90 {
-		bufferRatio *= 0.7 // 极高置信度：减少30%缓冲
+		allocationRatio *= 1.15 // 极高置信度：增加15%
 	} else if decision.Confidence >= 85 {
-		bufferRatio *= 0.8 // 高置信度：减少20%缓冲
+		allocationRatio *= 1.10 // 高置信度：增加10%
 	}
 	
-	// 计算安全缓冲（至少保留3 USDT，但不超过余额的12%）
-	buffer := math.Max(availableBalance*bufferRatio, 3.0)
-	buffer = math.Min(buffer, availableBalance*0.12) // 最多保留12%
-
-	effectiveBalance := availableBalance - buffer
-	if effectiveBalance <= 0 {
-		effectiveBalance = availableBalance * 0.85 // 至少使用85%的余额
+	// 确保分配比例不超过40%（单仓上限）
+	allocationRatio = math.Min(allocationRatio, 0.40)
+	
+	// 计算分配给当前仓位的可用余额
+	allocatedBalance := availableBalance * allocationRatio
+	
+	// 安全缓冲：保留5-8%作为安全缓冲（用于手续费、滑点等）
+	var bufferRatio float64
+	if availableBalance >= 1000 {
+		bufferRatio = 0.05 // 大账户：5%缓冲
+	} else if availableBalance >= 500 {
+		bufferRatio = 0.06 // 中等账户：6%缓冲
+	} else {
+		bufferRatio = 0.08 // 小账户：8%缓冲
 	}
+	
+	buffer := availableBalance * bufferRatio
+	effectiveBalance := allocatedBalance - buffer
+	
+	// 确保有效余额至少为分配余额的85%
+	if effectiveBalance < allocatedBalance*0.85 {
+		effectiveBalance = allocatedBalance * 0.85
+	}
+	
+	// 如果有效余额太小，至少使用最小分配
+	if effectiveBalance < availableBalance*0.12 {
+		effectiveBalance = availableBalance * 0.12
+	}
+	
 	if effectiveBalance <= 0 {
 		return "", fmt.Errorf("可用余额 %.2f USDT 无法满足安全缓冲要求", availableBalance)
 	}
@@ -2035,7 +2055,7 @@ func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availab
 		original := decision.PositionSizeUSD
 		decision.PositionSizeUSD = maxPositionUSD
 		adjustments = append(adjustments,
-			fmt.Sprintf("保证金限制，仓位 %.2f→%.2f USDT（可用余额: %.2f USDT）", original, decision.PositionSizeUSD, availableBalance))
+			fmt.Sprintf("智能分配限制（当前持仓%d个），仓位 %.2f→%.2f USDT（可用余额: %.2f USDT）", positionCount, original, decision.PositionSizeUSD, availableBalance))
 	}
 
 	if decision.PositionSizeUSD < minNotional {
@@ -2075,8 +2095,8 @@ func (at *AutoTrader) applyRiskGuards(ctx *decision.Context, d *decision.Decisio
 		return false, fmt.Sprintf("保证金使用率 %.1f%% ≥ 70%%，禁止继续开仓（预留30%%保证金用于多单）", ctx.Account.MarginUsedPct)
 	}
 
-	if ctx.Account.PositionCount >= 3 {
-		return false, "当前持仓已达3个，禁止继续加仓"
+	if ctx.Account.PositionCount >= 5 {
+		return false, "当前持仓已达5个，禁止继续加仓"
 	}
 
 	if ctx.Account.TotalPnLPct <= -8 && d.Confidence < 85 {

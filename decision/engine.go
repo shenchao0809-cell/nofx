@@ -61,6 +61,18 @@ type OpenOrderInfo struct {
 	StopPrice    float64 `json:"stop_price"`    // Trigger price (for stop-loss/take-profit orders)
 }
 
+// ClosedPositionInfo 最近被止盈止损触发的持仓信息
+type ClosedPositionInfo struct {
+	Symbol      string  `json:"symbol"`       // 交易对
+	Side        string  `json:"side"`         // 方向: "long" or "short"
+	EntryPrice  float64 `json:"entry_price"`  // 开仓价格
+	ClosePrice  float64 `json:"close_price"`  // 平仓价格
+	Quantity    float64 `json:"quantity"`     // 数量
+	Leverage    int     `json:"leverage"`      // 杠杆
+	PnLPct      float64 `json:"pnl_pct"`      // 盈亏百分比
+	CloseReason string  `json:"close_reason"` // 平仓原因: "stop_loss", "take_profit", "liquidation", "unknown"
+}
+
 // AccountInfo 账户信息
 type AccountInfo struct {
 	TotalEquity      float64 `json:"total_equity"`      // 账户净值
@@ -97,6 +109,7 @@ type Context struct {
 	Account            AccountInfo                 `json:"account"`
 	Positions          []PositionInfo              `json:"positions"`
 	OpenOrders         []OpenOrderInfo             `json:"open_orders"` // List of open orders for AI context
+	RecentClosedPositions []ClosedPositionInfo     `json:"recent_closed_positions"` // 最近被止盈止损触发的持仓信息
 	CandidateCoins     []CandidateCoin             `json:"candidate_coins"`
 	MarketDataMap      map[string]*market.Data                `json:"-"` // 不序列化，但内部使用
 	OITopDataMap       map[string]*OITopData                   `json:"-"` // OI Top数据映射
@@ -436,7 +449,7 @@ func fetchMarketDataForContext(ctx *Context) error {
 		// 持仓价值 = 持仓量 × 当前价格
 		// 但现有持仓必须保留（需要决策是否平仓）
 		// 💡 OI 門檻配置：用戶可根據風險偏好調整
-		const minOIThresholdMillions = 15.0 // 可調整：15M(保守) / 10M(平衡) / 8M(寬鬆) / 5M(激進)
+		const minOIThresholdMillions = 8.0 // 可調整：15M(保守) / 10M(平衡) / 8M(寬鬆) / 5M(激進)
 
 		isExistingPosition := positionSymbols[symbol]
 		isBTCUSDT := symbol == "BTCUSDT" // BTCUSDT必须保留，用于市场概览
@@ -561,15 +574,15 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 	// 2. 硬约束（风险控制）- 动态生成
 	sb.WriteString("# 硬约束（风险控制）\n\n")
-	sb.WriteString("1. 风险回报比: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
-	sb.WriteString("2. 最多持仓: 3个币种（质量>数量）\n")
+	sb.WriteString("1. 风险回报比: 必须 ≥ 1:1.5（冒1%风险，赚1.5%+收益）\n")
+	sb.WriteString("2. 最多持仓: 5个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. 单币仓位: 山寨%.0f-%.0f U | BTC/ETH %.0f-%.0f U\n",
 		accountEquity*2.5, accountEquity*5, accountEquity*5, accountEquity*10))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
 	sb.WriteString("5. 保证金: 总使用率 ≤ 70%（预留30%用于多单开仓，确保可以同时开2-3单）\n")
 	sb.WriteString("6. **决策稳定性要求（⚠️ 严格执行）**：\n")
 	sb.WriteString("   - **开仓置信度必须≥80（建议≥85）**：如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓\n")
-	sb.WriteString("   - **风险回报比必须≥3:1**：确保决策质量和稳定性\n")
+	sb.WriteString("   - **风险回报比必须≥1.5:1**：确保决策质量和稳定性\n")
 	sb.WriteString("   - ⚠️ **违反以上要求将导致决策被拒绝，请严格遵守**\n")
 
 	// 7. 开仓金额：根据账户规模动态提示（使用统一的配置规则）
@@ -599,6 +612,14 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString(fmt.Sprintf("- 山寨币开仓范围：**%.0f - %.0f USDT** (净值的 2.5-5 倍，建议使用中上值)\n", accountEquity*2.5, accountEquity*5))
 	sb.WriteString(fmt.Sprintf("- BTC/ETH开仓范围：**%.0f - %.0f USDT** (净值的 5-10 倍，建议使用中上值)\n", accountEquity*5, accountEquity*10))
 	sb.WriteString("- ⚠️ **不要使用最小值**：避免使用范围下限，建议使用中上值（如山寨币用3.5-4.5倍，BTC/ETH用7-9倍）\n")
+	sb.WriteString("- ✅ **智能资金分配策略**：系统会根据当前持仓数量自动分配资金，目标是能够开3-4单\n")
+	sb.WriteString("  - 无持仓时：可以使用30-35%的可用余额\n")
+	sb.WriteString("  - 已有1个持仓：使用25-30%的可用余额\n")
+	sb.WriteString("  - 已有2个持仓：使用20-25%的可用余额\n")
+	sb.WriteString("  - 已有3个持仓：使用15-20%的可用余额\n")
+	sb.WriteString("  - 已有4个持仓：使用12-15%的可用余额\n")
+	sb.WriteString("  - 已有5个持仓：使用10-12%的可用余额\n")
+	sb.WriteString("- ✅ **杠杆建议**：为了减少保证金占用，支持开多单，建议使用较高杠杆（8-15x），特别是高置信度时\n")
 	sb.WriteString("- ✅ **如果可用余额充足（>账户净值的50%），应该充分利用可用余额，使用更大的仓位和更高的杠杆**\n")
 	sb.WriteString("- ✅ **高置信度（≥85）时，可以使用接近上限的仓位和杠杆，充分利用可用资金**\n")
 	sb.WriteString("- ⚠️ **置信度要求（严格执行）**：开仓时 `confidence` 必须≥80，如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓\n")
@@ -615,29 +636,36 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("</reasoning>\n\n")
 	sb.WriteString("<decision>\n")
 	sb.WriteString("```json\n[\n")
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉+多重确认\"},\n", btcEthLeverage, accountEquity*7.5)) // 使用中上值，置信度85确保稳定性
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉+多重确认\"},\n", btcEthLeverage, accountEquity*7.5)) // 使用中上值，置信度85确保稳定性，不设置take_profit
 	sb.WriteString("  // ⚠️ 注意：如果置信度<80，必须使用 \"action\": \"wait\" 而不是开仓\n")
-	sb.WriteString("  {\"symbol\": \"SOLUSDT\", \"action\": \"update_stop_loss\", \"new_stop_loss\": 155, \"reasoning\": \"移动止损至保本位\"},\n")
-	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
+	sb.WriteString("  // ⚠️ 注意：开仓时不需要设置 take_profit，系统不设置止盈单，让利润持续累积\n")
+	sb.WriteString("  {\"symbol\": \"SOLUSDT\", \"action\": \"update_stop_loss\", \"new_stop_loss\": 155, \"reasoning\": \"盈利3%%，移动止损至保本位保护利润\"},\n")
+	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"趋势反转，手动平仓\"}\n")
 	sb.WriteString("]\n```\n")
 	sb.WriteString("</decision>\n\n")
 	sb.WriteString("## 字段说明\n\n")
 	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | update_stop_loss | update_take_profit | partial_close | hold | wait\n")
 	sb.WriteString("- `confidence`: 0-100（⚠️ **开仓必须≥80，建议≥85**；如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓）\n")
-	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n")
+	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, confidence, risk_usd, reasoning\n")
+	sb.WriteString("- ⚠️ **重要：不需要设置 take_profit（止盈）**：系统不设置止盈单，让利润持续累积\n")
+	sb.WriteString("  - 通过移动止损（update_stop_loss）来保护利润：当盈利达到1.5-3%%时，将止损移动到保本或盈利位置\n")
+	sb.WriteString("  - 随着利润增加，逐步提高止损位，实现\"止损就是止盈\"的策略\n")
+	sb.WriteString("  - 止损不能太夸张：开仓时设置合理的止损（通常为入场价的2-5%%），后续根据盈利情况逐步调整\n")
 	sb.WriteString("- update_stop_loss 时必填: new_stop_loss (注意是 new_stop_loss，不是 stop_loss)\n")
-	sb.WriteString("- update_take_profit 时必填: new_take_profit (注意是 new_take_profit，不是 take_profit)\n")
+	sb.WriteString("- update_take_profit 时必填: new_take_profit (注意是 new_take_profit，不是 take_profit) - ⚠️ 通常不需要使用\n")
 	sb.WriteString("- partial_close 时必填: close_percentage (0-100)\n\n")
 	sb.WriteString("## 🛡️ 未成交挂单提醒\n\n")
 	sb.WriteString("在「当前持仓」部分，你会看到每个持仓的挂单状态：\n\n")
 	sb.WriteString("- 🛡️ **止损单**: 表示该持仓已有止损保护\n")
-	sb.WriteString("- 🎯 **止盈单**: 表示该持仓已设置止盈目标\n")
+	sb.WriteString("- ⚠️ **系统不设置止盈单**：让利润持续累积，通过移动止损来保护利润（兜底止盈）\n")
 	sb.WriteString("- ⚠️ **该持仓没有止损保护！**: 表示该持仓缺少止损单，需要立即设置\n\n")
 	sb.WriteString("**重要**: \n")
 	sb.WriteString("- ✅ 如果看到 🛡️ 止损单已存在，且你想调整止损价格，仍可使用 `update_stop_loss` 动作（系统会自动取消旧单并设置新单）\n")
 	sb.WriteString("- ⚠️ 如果看到 🛡️ 止损单已存在，且当前止损价格合理，**不要重复发送相同的 update_stop_loss 指令**\n")
 	sb.WriteString("- 🚨 如果看到 ⚠️ **该持仓没有止损保护！**，必须立即使用 `update_stop_loss` 设置止损，否则风险极高\n")
-	sb.WriteString("- 同样规则适用于 `update_take_profit` 和 🎯 止盈单\n\n")
+	sb.WriteString("- 🚨 **重要**：如果价格接近止损（距离<1%%），且你希望\"观察是否反弹\"，必须使用 `update_stop_loss` 调整止损到更远位置（至少2-3%%），否则价格触及止损时交易所会自动执行止损！\n")
+	sb.WriteString("- ⚠️ **\"保持现有止损\"不会取消止损单**：如果价格触及止损价，交易所会自动平仓，系统无法阻止！\n")
+	sb.WriteString("- 💡 **建议**：如果希望观察反弹，应该调整止损到更远位置（如入场价下方3-5%%），给反弹留出空间\n\n")
 
 	return sb.String()
 }
@@ -724,13 +752,45 @@ func buildUserPrompt(ctx *Context) string {
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
 	
-	// 🔧 如果可用余额充足，提示AI使用更大的仓位
-	if availableBalancePct > 50 {
+	// 🔧 智能资金分配提示：根据持仓数量提示AI
+	if ctx.Account.PositionCount == 0 {
+		sb.WriteString(fmt.Sprintf("💡 **当前无持仓，系统将分配约30-35%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（8-15x）减少保证金占用**\n", availableBalancePct))
+	} else if ctx.Account.PositionCount == 1 {
+		sb.WriteString(fmt.Sprintf("💡 **当前已有1个持仓，系统将分配约25-30%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（8-15x）**\n", availableBalancePct))
+	} else if ctx.Account.PositionCount == 2 {
+		sb.WriteString(fmt.Sprintf("💡 **当前已有2个持仓，系统将分配约20-25%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（10-15x）**\n", availableBalancePct))
+	} else if ctx.Account.PositionCount == 3 {
+		sb.WriteString(fmt.Sprintf("💡 **当前已有3个持仓，系统将分配约15-20%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（12-15x）**\n", availableBalancePct))
+	} else if ctx.Account.PositionCount == 4 {
+		sb.WriteString(fmt.Sprintf("💡 **当前已有4个持仓，系统将分配约12-15%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（12-15x）**\n", availableBalancePct))
+	} else if ctx.Account.PositionCount == 5 {
+		sb.WriteString(fmt.Sprintf("💡 **当前已有5个持仓，系统将分配约10-12%%的可用余额给新仓位（%.1f%%可用），建议使用较高杠杆（12-15x）**\n", availableBalancePct))
+	} else if availableBalancePct > 50 {
 		sb.WriteString(fmt.Sprintf("💡 **可用余额充足（%.1f%%），建议充分利用可用资金，使用更大的仓位和更高的杠杆**\n", availableBalancePct))
 	} else if availableBalancePct > 30 {
 		sb.WriteString(fmt.Sprintf("💡 **可用余额较多（%.1f%%），可以使用中上值的仓位和杠杆**\n", availableBalancePct))
 	}
 	sb.WriteString("\n")
+
+	// 🔔 最近被止盈止损触发的持仓信息
+	if len(ctx.RecentClosedPositions) > 0 {
+		sb.WriteString("🔔 **重要：最近被止盈止损触发的持仓**\n\n")
+		for _, closed := range ctx.RecentClosedPositions {
+			reasonCN := "止损"
+			if closed.CloseReason == "take_profit" {
+				reasonCN = "止盈"
+			}
+			sb.WriteString(fmt.Sprintf("- %s %s | 开仓: %.4f → 平仓: %.4f | 盈亏: %+.2f%% | 原因: %s\n",
+				closed.Symbol,
+				closed.Side,
+				closed.EntryPrice,
+				closed.ClosePrice,
+				closed.PnLPct,
+				reasonCN))
+		}
+		sb.WriteString("\n⚠️ **重要提醒**：以上持仓已被交易所自动平仓（止盈/止损触发），系统已检测到并记录。\n")
+		sb.WriteString("请根据这些信息评估市场状况，并决定是否需要调整其他持仓的止盈止损策略。\n\n")
+	}
 
 	// 市场状态概览
 	if ctx.MarketSummary != nil {
@@ -775,6 +835,46 @@ func buildUserPrompt(ctx *Context) string {
 				i+1, pos.Symbol, strings.ToUpper(pos.Side),
 				pos.EntryPrice, pos.MarkPrice, pos.Quantity, positionValue, pos.UnrealizedPnLPct, pos.UnrealizedPnL, pos.PeakPnLPct,
 				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
+			
+			// 💡 移动止损提示（兜底止盈）
+			if pos.UnrealizedPnLPct > 0 {
+				// 盈利时，提示AI考虑移动止损
+				if pos.UnrealizedPnLPct >= 3.0 {
+					// 盈利≥3%：建议移动到保本或小幅盈利
+					sb.WriteString(fmt.Sprintf("   💡 **盈利%.2f%%**：建议使用 `update_stop_loss` 将止损移动到保本价附近（入场价±0.5%%），锁定利润\n", pos.UnrealizedPnLPct))
+				} else if pos.UnrealizedPnLPct >= 1.5 {
+					// 盈利≥1.5%：可以开始考虑移动止损
+					sb.WriteString(fmt.Sprintf("   💡 **盈利%.2f%%**：可以考虑使用 `update_stop_loss` 逐步提高止损位，保护利润\n", pos.UnrealizedPnLPct))
+				}
+				
+				// 如果当前盈利明显低于最高盈利，提示回撤风险
+				if pos.PeakPnLPct > pos.UnrealizedPnLPct+2.0 {
+					sb.WriteString(fmt.Sprintf("   ⚠️ **回撤警告**：当前盈利%.2f%% 低于最高盈利%.2f%%，已回撤%.2f%%，建议考虑移动止损保护利润\n", 
+						pos.UnrealizedPnLPct, pos.PeakPnLPct, pos.PeakPnLPct-pos.UnrealizedPnLPct))
+				}
+			}
+			
+			// ⚠️ 价格接近止损警告（防止"保持现有止损"但价格触及止损导致自动平仓）
+			if pos.StopLoss > 0 {
+				var distanceToStopLoss float64
+				if pos.Side == "long" {
+					// 多头：止损价低于当前价
+					distanceToStopLoss = ((pos.MarkPrice - pos.StopLoss) / pos.MarkPrice) * 100
+				} else {
+					// 空头：止损价高于当前价
+					distanceToStopLoss = ((pos.StopLoss - pos.MarkPrice) / pos.MarkPrice) * 100
+				}
+				
+				// 如果价格距离止损<1%，警告AI需要调整止损
+				if distanceToStopLoss < 1.0 && distanceToStopLoss > 0 {
+					sb.WriteString(fmt.Sprintf("   🚨 **止损警告**：当前价%.4f 距离止损价%.4f 仅%.2f%%，如果希望\"观察是否反弹\"，必须使用 `update_stop_loss` 调整止损到更远位置（建议至少2-3%%），否则价格触及止损时交易所会自动平仓！\n", 
+						pos.MarkPrice, pos.StopLoss, distanceToStopLoss))
+					sb.WriteString("   ⚠️ **重要**：\"保持现有止损\"不会取消止损单，如果价格触及止损价，交易所会自动执行止损！\n")
+				} else if distanceToStopLoss < 0.5 && distanceToStopLoss > 0 {
+					sb.WriteString(fmt.Sprintf("   🚨 **紧急止损警告**：当前价%.4f 非常接近止损价%.4f（仅%.2f%%），价格随时可能触及止损！如果希望观察反弹，必须立即使用 `update_stop_loss` 调整止损！\n", 
+						pos.MarkPrice, pos.StopLoss, distanceToStopLoss))
+				}
+			}
 
 			// Display stop-loss/take-profit orders for this position to prevent duplicate orders
 			hasStopLoss := false
@@ -787,9 +887,8 @@ func buildUserPrompt(ctx *Context) string {
 				if order.Type == "STOP_MARKET" || order.Type == "STOP" {
 					sb.WriteString(fmt.Sprintf("   🛡️ 止损单: %.4f (%s)\n", order.StopPrice, order.Side))
 					hasStopLoss = true
-				} else if order.Type == "TAKE_PROFIT_MARKET" || order.Type == "TAKE_PROFIT" {
-					sb.WriteString(fmt.Sprintf("   🎯 止盈单: %.4f (%s)\n", order.StopPrice, order.Side))
 				}
+				// ⚠️ 系统不设置止盈单，让利润持续累积，通过移动止损来保护利润
 			}
 
 			if !hasStopLoss {
@@ -1403,51 +1502,40 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
 			}
 		}
-		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
-			return fmt.Errorf("止损和止盈必须大于0")
+		// ⚠️ 只验证止损，不验证止盈（系统不设置止盈单）
+		if d.StopLoss <= 0 {
+			return fmt.Errorf("止损必须大于0")
 		}
-
-		// 验证止损止盈的合理性
-		if d.Action == "open_long" {
-			if d.StopLoss >= d.TakeProfit {
-				return fmt.Errorf("做多时止损价必须小于止盈价")
+		
+		// ⚠️ 验证止损的合理性（不能太夸张）
+		// 获取当前价格来验证止损是否合理
+		marketData, err := market.Get(d.Symbol)
+		if err == nil {
+			currentPrice := marketData.CurrentPrice
+			var stopLossPct float64
+			if d.Action == "open_long" {
+				// 做多：止损应该低于当前价
+				if d.StopLoss >= currentPrice {
+					return fmt.Errorf("做多时止损价(%.2f)必须低于当前价(%.2f)", d.StopLoss, currentPrice)
+				}
+				stopLossPct = (currentPrice - d.StopLoss) / currentPrice * 100
+			} else {
+				// 做空：止损应该高于当前价
+				if d.StopLoss <= currentPrice {
+					return fmt.Errorf("做空时止损价(%.2f)必须高于当前价(%.2f)", d.StopLoss, currentPrice)
+				}
+				stopLossPct = (d.StopLoss - currentPrice) / currentPrice * 100
 			}
-		} else {
-			if d.StopLoss <= d.TakeProfit {
-				return fmt.Errorf("做空时止损价必须大于止盈价")
+			
+			// 止损不能太夸张：通常应该在2-10%之间
+			if stopLossPct > 10.0 {
+				return fmt.Errorf("止损幅度过大(%.2f%%)，建议控制在2-10%%以内，当前止损价: %.2f，当前价: %.2f", 
+					stopLossPct, d.StopLoss, currentPrice)
 			}
-		}
-
-		// 验证风险回报比（必须≥1:3）
-		// 计算入场价（假设当前市价）
-		var entryPrice float64
-		if d.Action == "open_long" {
-			// 做多：入场价在止损和止盈之间
-			entryPrice = d.StopLoss + (d.TakeProfit-d.StopLoss)*0.2 // 假设在20%位置入场
-		} else {
-			// 做空：入场价在止损和止盈之间
-			entryPrice = d.StopLoss - (d.StopLoss-d.TakeProfit)*0.2 // 假设在20%位置入场
-		}
-
-		var riskPercent, rewardPercent, riskRewardRatio float64
-		if d.Action == "open_long" {
-			riskPercent = (entryPrice - d.StopLoss) / entryPrice * 100
-			rewardPercent = (d.TakeProfit - entryPrice) / entryPrice * 100
-			if riskPercent > 0 {
-				riskRewardRatio = rewardPercent / riskPercent
+			if stopLossPct < 0.5 {
+				return fmt.Errorf("止损幅度过小(%.2f%%)，建议至少0.5%%以上，当前止损价: %.2f，当前价: %.2f", 
+					stopLossPct, d.StopLoss, currentPrice)
 			}
-		} else {
-			riskPercent = (d.StopLoss - entryPrice) / entryPrice * 100
-			rewardPercent = (entryPrice - d.TakeProfit) / entryPrice * 100
-			if riskPercent > 0 {
-				riskRewardRatio = rewardPercent / riskPercent
-			}
-		}
-
-		// ✅ 稳定性检查2：风险回报比必须≥3.0（硬约束）
-		if riskRewardRatio < 3.0 {
-			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥3.0:1以确保决策稳定性 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
-				riskRewardRatio, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
 		}
 	}
 
