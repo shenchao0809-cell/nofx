@@ -196,8 +196,8 @@ func buildAccountNotes(ctx *Context) []string {
 	acc := ctx.Account
 	notes := []string{}
 
-	if acc.MarginUsedPct >= 70 {
-		notes = append(notes, fmt.Sprintf("保证金使用率 %.1f%% 偏高，避免继续加仓", acc.MarginUsedPct))
+	if acc.MarginUsedPct >= 60 {
+		notes = append(notes, fmt.Sprintf("保证金使用率 %.1f%% 偏高，谨慎加仓（建议预留30%%用于多单）", acc.MarginUsedPct))
 	}
 	if acc.TotalPnLPct <= -8 {
 		notes = append(notes, fmt.Sprintf("账户回撤 %.1f%%，应降低仓位或等待修复", acc.TotalPnLPct))

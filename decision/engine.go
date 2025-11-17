@@ -218,11 +218,30 @@ func fetchPatternAnalysisForContext(ctx *Context) {
 		log.Printf("📊 使用配置的时间周期进行分析: %v（共%d个时间周期）", timeframes, len(timeframes))
 	}
 	
-	// 收集需要分析的币种（BTCUSDT + 所有持仓 + 用户选择的币种）
+	// 收集需要分析的币种（只分析用户配置的币种）
 	symbolsToAnalyze := make(map[string]bool)
 	
-	// 0. 强制分析BTCUSDT（用于市场概览和决策参考）
-	symbolsToAnalyze["BTCUSDT"] = true
+	// 检查BTC是否在用户配置的币种中（持仓或候选币种）
+	hasBTCInPositions := false
+	hasBTCInCandidates := false
+	for _, pos := range ctx.Positions {
+		if pos.Symbol == "BTCUSDT" {
+			hasBTCInPositions = true
+			break
+		}
+	}
+	for _, coin := range ctx.CandidateCoins {
+		if coin.Symbol == "BTCUSDT" {
+			hasBTCInCandidates = true
+			break
+		}
+	}
+	
+	// 0. 只有在用户配置了BTC时才分析BTCUSDT
+	// 如果BTC在持仓或候选币种中，才分析BTC
+	if hasBTCInPositions || hasBTCInCandidates {
+		symbolsToAnalyze["BTCUSDT"] = true
+	}
 	
 	// 1. 持仓币种
 	for _, pos := range ctx.Positions {
@@ -355,9 +374,27 @@ func fetchMarketDataForContext(ctx *Context) error {
 	// 收集所有需要获取数据的币种
 	symbolSet := make(map[string]bool)
 
-	// 0. 强制获取BTCUSDT数据（用于决策提示词中的市场概览）
-	// 无论BTC是否在持仓或候选列表中，都需要获取最新数据
-	symbolSet["BTCUSDT"] = true
+	// 检查BTC是否在用户配置的币种中（持仓或候选币种）
+	hasBTCInPositions := false
+	hasBTCInCandidates := false
+	for _, pos := range ctx.Positions {
+		if pos.Symbol == "BTCUSDT" {
+			hasBTCInPositions = true
+			break
+		}
+	}
+	for _, coin := range ctx.CandidateCoins {
+		if coin.Symbol == "BTCUSDT" {
+			hasBTCInCandidates = true
+			break
+		}
+	}
+
+	// 0. 只有在用户配置了BTC时才获取BTCUSDT数据
+	// 如果BTC在持仓或候选币种中，才获取BTC数据
+	if hasBTCInPositions || hasBTCInCandidates {
+		symbolSet["BTCUSDT"] = true
+	}
 
 	// 1. 优先获取持仓币种的数据（这是必须的）
 	for _, pos := range ctx.Positions {
@@ -529,7 +566,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString(fmt.Sprintf("3. 单币仓位: 山寨%.0f-%.0f U | BTC/ETH %.0f-%.0f U\n",
 		accountEquity*2.5, accountEquity*5, accountEquity*5, accountEquity*10))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
-	sb.WriteString("5. 保证金: 总使用率 ≤ 90%\n")
+	sb.WriteString("5. 保证金: 总使用率 ≤ 70%（预留30%用于多单开仓，确保可以同时开2-3单）\n")
 	sb.WriteString("6. **决策稳定性要求（⚠️ 严格执行）**：\n")
 	sb.WriteString("   - **开仓置信度必须≥80（建议≥85）**：如果置信度<80，必须选择 `wait` 或 `hold`，不能开仓\n")
 	sb.WriteString("   - **风险回报比必须≥3:1**：确保决策质量和稳定性\n")
@@ -613,49 +650,68 @@ func buildUserPrompt(ctx *Context) string {
 	sb.WriteString(fmt.Sprintf("时间: %s | 周期: #%d | 运行: %d分钟\n\n",
 		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
 
-	// BTC 市场（多时间周期分析）
-	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		price := btcData.RealtimePrice
-		if price <= 0 {
-			price = btcData.CurrentPrice
+	// BTC 市场（多时间周期分析）- 只在用户配置了BTC时显示
+	// 检查BTC是否在用户配置的币种中（持仓或候选币种）
+	hasBTCInPositions := false
+	hasBTCInCandidates := false
+	for _, pos := range ctx.Positions {
+		if pos.Symbol == "BTCUSDT" {
+			hasBTCInPositions = true
+			break
 		}
-		sb.WriteString(fmt.Sprintf("BTC: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n",
-			price, btcData.PriceChange1h, btcData.PriceChange4h,
-			btcData.CurrentMACD, btcData.CurrentRSI7))
-		
-		// 添加BTC的多时间周期K线形态分析（完整详细信息）
-		if btcAnalyses, hasBTCAnalyses := ctx.MultiTimeframeAnalysisMap["BTCUSDT"]; hasBTCAnalyses && len(btcAnalyses) > 0 {
-			sb.WriteString("\n### BTC 多时间周期K线形态分析\n\n")
+	}
+	for _, coin := range ctx.CandidateCoins {
+		if coin.Symbol == "BTCUSDT" {
+			hasBTCInCandidates = true
+			break
+		}
+	}
+	
+	// 只有在用户配置了BTC时才显示BTC分析
+	if (hasBTCInPositions || hasBTCInCandidates) {
+		if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
+			price := btcData.RealtimePrice
+			if price <= 0 {
+				price = btcData.CurrentPrice
+			}
+			sb.WriteString(fmt.Sprintf("BTC: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n",
+				price, btcData.PriceChange1h, btcData.PriceChange4h,
+				btcData.CurrentMACD, btcData.CurrentRSI7))
 			
-			// 按时间周期排序显示（短周期到长周期）
-			intervalOrder := []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
-			for _, interval := range intervalOrder {
-				if analysis, exists := btcAnalyses[interval]; exists {
-					// 使用FormatForPrompt显示完整的形态分析（包括所有形态、支撑位、阻力位等）
-					sb.WriteString(analysis.FormatForPrompt())
-					
-					// 添加K线可视化（对关键时间周期：1m, 15m, 1h, 4h, 1d）
-					if interval == "1m" || interval == "15m" || interval == "1h" || interval == "4h" || interval == "1d" {
-						// 获取K线数据用于可视化
-						apiClient := market.NewAPIClient()
-						klines, err := apiClient.GetKlines("BTCUSDT", interval, 50) // 获取最近50根用于可视化
-						if err == nil && len(klines) > 0 {
-							visualization := FormatKlineVisualization(klines, "BTCUSDT", interval, 50)
-							if visualization != "" {
-								sb.WriteString(visualization)
+			// 添加BTC的多时间周期K线形态分析（完整详细信息）
+			if btcAnalyses, hasBTCAnalyses := ctx.MultiTimeframeAnalysisMap["BTCUSDT"]; hasBTCAnalyses && len(btcAnalyses) > 0 {
+				sb.WriteString("\n### BTC 多时间周期K线形态分析\n\n")
+				
+				// 按时间周期排序显示（短周期到长周期）
+				intervalOrder := []string{"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+				for _, interval := range intervalOrder {
+					if analysis, exists := btcAnalyses[interval]; exists {
+						// 使用FormatForPrompt显示完整的形态分析（包括所有形态、支撑位、阻力位等）
+						sb.WriteString(analysis.FormatForPrompt())
+						
+						// 添加K线可视化（对关键时间周期：1m, 15m, 1h, 4h, 1d）
+						if interval == "1m" || interval == "15m" || interval == "1h" || interval == "4h" || interval == "1d" {
+							// 获取K线数据用于可视化
+							apiClient := market.NewAPIClient()
+							klines, err := apiClient.GetKlines("BTCUSDT", interval, 50) // 获取最近50根用于可视化
+							if err == nil && len(klines) > 0 {
+								visualization := FormatKlineVisualization(klines, "BTCUSDT", interval, 50)
+								if visualization != "" {
+									sb.WriteString(visualization)
+								}
 							}
 						}
 					}
 				}
+			} else {
+				// 兼容性：如果没有多时间周期分析，使用旧的单时间周期分析
+			if btcPatternAnalysis, hasBTCPattern := ctx.PatternAnalysisMap["BTCUSDT"]; hasBTCPattern {
+					sb.WriteString(btcPatternAnalysis.FormatForPrompt())
+				}
 			}
-		} else {
-			// 兼容性：如果没有多时间周期分析，使用旧的单时间周期分析
-		if btcPatternAnalysis, hasBTCPattern := ctx.PatternAnalysisMap["BTCUSDT"]; hasBTCPattern {
-				sb.WriteString(btcPatternAnalysis.FormatForPrompt())
-			}
+			
+			sb.WriteString("\n")
 		}
-		
-		sb.WriteString("\n")
 	}
 
 	// 账户

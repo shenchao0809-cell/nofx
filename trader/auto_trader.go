@@ -1959,35 +1959,35 @@ func (at *AutoTrader) normalizePositionSize(decision *decision.Decision, availab
 	feeRate := at.effectiveTakerFeeRate()
 	minNotional := at.minNotionalForSymbol(decision.Symbol)
 
-	// 🔧 动态调整安全缓冲：根据可用余额和AI置信度智能调整
-	// 余额越多，缓冲比例越低；置信度越高，缓冲比例越低
+	// 🔧 优化安全缓冲：降低缓冲比例，确保可以开多单
+	// 调整策略：减少缓冲，让更多资金可用于开仓，同时保持基本安全
 	var bufferRatio float64
 	
-	// 根据可用余额调整缓冲比例
+	// 根据可用余额调整缓冲比例（降低缓冲，增加可用资金）
 	if availableBalance >= 1000 {
-		// 大账户（≥1000 USDT）：使用较小缓冲（5-8%）
-		bufferRatio = 0.05
+		// 大账户（≥1000 USDT）：使用最小缓冲（3-5%）
+		bufferRatio = 0.03
 	} else if availableBalance >= 500 {
-		// 中等账户（500-1000 USDT）：使用中等缓冲（8-10%）
-		bufferRatio = 0.08
+		// 中等账户（500-1000 USDT）：使用较小缓冲（5-7%）
+		bufferRatio = 0.05
 	} else if availableBalance >= 200 {
-		// 小账户（200-500 USDT）：使用标准缓冲（10%）
-		bufferRatio = 0.10
+		// 小账户（200-500 USDT）：使用中等缓冲（7-9%）
+		bufferRatio = 0.07
 	} else {
-		// 很小账户（<200 USDT）：使用较大缓冲（12%）
-		bufferRatio = 0.12
+		// 很小账户（<200 USDT）：使用标准缓冲（10%）
+		bufferRatio = 0.10
 	}
 	
 	// 根据AI置信度进一步调整缓冲（高置信度时降低缓冲）
 	if decision.Confidence >= 90 {
-		bufferRatio *= 0.8 // 极高置信度：减少20%缓冲
+		bufferRatio *= 0.7 // 极高置信度：减少30%缓冲
 	} else if decision.Confidence >= 85 {
-		bufferRatio *= 0.9 // 高置信度：减少10%缓冲
+		bufferRatio *= 0.8 // 高置信度：减少20%缓冲
 	}
 	
-	// 计算安全缓冲（至少保留5 USDT，但不超过余额的15%）
-	buffer := math.Max(availableBalance*bufferRatio, 5.0)
-	buffer = math.Min(buffer, availableBalance*0.15) // 最多保留15%
+	// 计算安全缓冲（至少保留3 USDT，但不超过余额的12%）
+	buffer := math.Max(availableBalance*bufferRatio, 3.0)
+	buffer = math.Min(buffer, availableBalance*0.12) // 最多保留12%
 
 	effectiveBalance := availableBalance - buffer
 	if effectiveBalance <= 0 {
@@ -2069,8 +2069,10 @@ func (at *AutoTrader) applyRiskGuards(ctx *decision.Context, d *decision.Decisio
 		return true, ""
 	}
 
-	if ctx.Account.MarginUsedPct >= 85 {
-		return false, fmt.Sprintf("保证金使用率 %.1f%% ≥ 85%%，禁止继续开仓", ctx.Account.MarginUsedPct)
+	// 🔧 调整保证金使用率限制：从85%降低到70%，确保可以开多单
+	// 70%的限制意味着还有30%的保证金可用于新开仓，足够开2-3单
+	if ctx.Account.MarginUsedPct >= 70 {
+		return false, fmt.Sprintf("保证金使用率 %.1f%% ≥ 70%%，禁止继续开仓（预留30%%保证金用于多单）", ctx.Account.MarginUsedPct)
 	}
 
 	if ctx.Account.PositionCount >= 3 {

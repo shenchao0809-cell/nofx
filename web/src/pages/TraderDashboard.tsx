@@ -799,27 +799,135 @@ function DecisionCard({
   const [showCoT, setShowCoT] = useState(false)
   const { token } = useAuth()
   
-  // 获取实时BTC价格用于对比
-  const { data: realtimeBTC } = useSWR(
-    token ? 'realtime-btc-for-decision' : null,
-    async () => {
-      const response = await fetch(
-        `/api/klines?symbol=BTCUSDT&interval=3m&limit=1`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      )
-      if (!response.ok) return null
-      const result = await response.json()
-      const klines = result.klines || []
-      if (klines.length === 0) return null
-      const latestKline = klines[klines.length - 1]
+  // 从input_prompt中提取所有货币的价格信息
+  const extractSymbolInfo = (prompt: string, symbol: string) => {
+    // 匹配格式: SYMBOL: price (1h: change1h%, 4h: change4h%) | MACD: macd | RSI: rsi
+    // 转义特殊字符以确保正则表达式安全
+    const escapedSymbol = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    
+    // 尝试多种匹配模式，因为格式可能略有不同
+    // 模式1: SYMBOL: price (1h: change1h%, 4h: change4h%) | MACD: macd | RSI: rsi
+    let pattern = new RegExp(`${escapedSymbol}:\\s*([\\d.]+)\\s*\\(1h:\\s*([+-]?[\\d.]+)%,\\s*4h:\\s*([+-]?[\\d.]+)%\\)\\s*\\|\\s*MACD:\\s*([\\d.]+)\\s*\\|\\s*RSI:\\s*([\\d.]+)`)
+    let match = prompt.match(pattern)
+    
+    // 如果模式1不匹配，尝试模式2: SYMBOL: price (1h: change1h%, 4h: change4h%) | MACD: macd | RSI: rsi（可能有换行）
+    if (!match) {
+      pattern = new RegExp(`${escapedSymbol}:\\s*([\\d.]+)\\s*\\(1h:\\s*([+-]?[\\d.]+)%,\\s*4h:\\s*([+-]?[\\d.]+)%\\)[\\s\\S]*?MACD:\\s*([\\d.]+)[\\s\\S]*?RSI:\\s*([\\d.]+)`)
+      match = prompt.match(pattern)
+    }
+    
+    if (match) {
       return {
-        price: latestKline.close,
-        timestamp: latestKline.openTime,
+        symbol,
+        price: parseFloat(match[1]),
+        change1h: parseFloat(match[2]),
+        change4h: parseFloat(match[3]),
+        macd: parseFloat(match[4]),
+        rsi: parseFloat(match[5]),
       }
+    }
+    
+    // 如果仍然不匹配，尝试只匹配价格和变化（没有MACD和RSI的情况）
+    pattern = new RegExp(`${escapedSymbol}:\\s*([\\d.]+)\\s*\\(1h:\\s*([+-]?[\\d.]+)%,\\s*4h:\\s*([+-]?[\\d.]+)%\\)`)
+    match = prompt.match(pattern)
+    if (match) {
+      return {
+        symbol,
+        price: parseFloat(match[1]),
+        change1h: parseFloat(match[2]),
+        change4h: parseFloat(match[3]),
+        macd: 0, // 如果找不到MACD，设为0
+        rsi: 0,  // 如果找不到RSI，设为0
+      }
+    }
+    
+    return null
+  }
+  
+  // 获取用户配置的货币列表（持仓 + 候选币种）
+  // 注意：只显示用户实际配置的币种，不强制包含BTC
+  const getConfiguredSymbols = () => {
+    const symbols = new Set<string>()
+    
+    // 添加持仓货币
+    if (decision.positions && Array.isArray(decision.positions)) {
+      decision.positions.forEach((pos: any) => {
+        if (pos.symbol) {
+          // 确保格式为 SYMBOLUSDT
+          const symbol = pos.symbol.endsWith('USDT') ? pos.symbol : `${pos.symbol}USDT`
+          symbols.add(symbol)
+        }
+      })
+    }
+    
+    // 添加候选币种
+    if (decision.candidate_coins && Array.isArray(decision.candidate_coins)) {
+      decision.candidate_coins.forEach((coin: string) => {
+        if (coin) {
+          // 确保格式为 SYMBOLUSDT
+          const symbol = coin.endsWith('USDT') ? coin : `${coin}USDT`
+          symbols.add(symbol)
+        }
+      })
+    }
+    
+    // 检查 input_prompt 中是否包含 BTC（如果系统添加了BTC，则显示；否则不显示）
+    // 只有当 prompt 中确实有 BTC 的市场指标时才添加
+    if (decision.input_prompt) {
+      const btcPattern = /BTC:\s*[\d.]+\s*\(1h:\s*[+-]?[\d.]+%,\s*4h:\s*[+-]?[\d.]+%\)\s*\|\s*MACD:\s*[\d.]+\s*\|\s*RSI:\s*[\d.]+/
+      if (btcPattern.test(decision.input_prompt)) {
+        symbols.add('BTCUSDT')
+      }
+    }
+    
+    return Array.from(symbols)
+  }
+  
+  // 提取所有配置货币的决策时价格信息
+  const configuredSymbols = getConfiguredSymbols()
+  const decisionSymbolInfos = decision.input_prompt
+    ? configuredSymbols
+        .map(symbol => extractSymbolInfo(decision.input_prompt, symbol))
+        .filter((info): info is NonNullable<typeof info> => info !== null)
+    : []
+  
+  // 为每个货币获取实时价格
+  const realtimePrices = useSWR(
+    token && decisionSymbolInfos.length > 0
+      ? `realtime-prices-${decisionSymbolInfos.map(i => i.symbol).join(',')}`
+      : null,
+    async () => {
+      const prices: Record<string, { price: number; timestamp: number }> = {}
+      
+      await Promise.all(
+        decisionSymbolInfos.map(async (info) => {
+          try {
+            const response = await fetch(
+              `/api/klines?symbol=${info.symbol}&interval=3m&limit=1`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                },
+              }
+            )
+            if (response.ok) {
+              const result = await response.json()
+              const klines = result.klines || []
+              if (klines.length > 0) {
+                const latestKline = klines[klines.length - 1]
+                prices[info.symbol] = {
+                  price: latestKline.close,
+                  timestamp: latestKline.openTime,
+                }
+              }
+            }
+          } catch (error) {
+            console.error(`获取 ${info.symbol} 实时价格失败:`, error)
+          }
+        })
+      )
+      
+      return prices
     },
     {
       refreshInterval: 3000, // 每3秒刷新（实时更新）
@@ -827,23 +935,6 @@ function DecisionCard({
       dedupingInterval: 2000,
     }
   )
-  
-  // 从input_prompt中提取BTC价格信息
-  const extractBTCInfo = (prompt: string) => {
-    const btcMatch = prompt.match(/BTC:\s*([\d.]+)\s*\(1h:\s*([+-]?[\d.]+)%,\s*4h:\s*([+-]?[\d.]+)%\)\s*\|\s*MACD:\s*([\d.]+)\s*\|\s*RSI:\s*([\d.]+)/)
-    if (btcMatch) {
-      return {
-        price: parseFloat(btcMatch[1]),
-        change1h: parseFloat(btcMatch[2]),
-        change4h: parseFloat(btcMatch[3]),
-        macd: parseFloat(btcMatch[4]),
-        rsi: parseFloat(btcMatch[5]),
-      }
-    }
-    return null
-  }
-  
-  const decisionBTCInfo = decision.input_prompt ? extractBTCInfo(decision.input_prompt) : null
 
   return (
     <div
@@ -863,10 +954,16 @@ function DecisionCard({
           <div className="text-xs" style={{ color: '#848E9C' }}>
             {new Date(decision.timestamp).toLocaleString()}
           </div>
-          {/* 实时BTC价格显示 */}
-          <div className="mt-1">
-              <RealTimeBTCPrice />
-          </div>
+          {/* 实时BTC价格显示 - 只在用户配置了BTC时显示 */}
+          {(() => {
+            // 检查用户是否配置了BTC（通过检查价格对比中是否有BTC）
+            const hasBTC = decisionSymbolInfos.some(info => info.symbol === 'BTCUSDT')
+            return hasBTC ? (
+              <div className="mt-1">
+                <RealTimeBTCPrice />
+              </div>
+            ) : null
+          })()}
         </div>
         <div
           className="px-3 py-1 rounded text-xs font-bold"
@@ -880,58 +977,103 @@ function DecisionCard({
         </div>
       </div>
 
-      {/* BTC价格对比 - 显示决策时的价格和当前实时价格 */}
-      {decisionBTCInfo && (
-        <div className="mb-3 p-3 rounded" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-          <div className="text-xs mb-2 font-semibold" style={{ color: '#848E9C' }}>
-            BTC价格对比
-          </div>
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div>
-              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
-                决策时价格（历史快照）
-              </div>
-              <div className="font-mono" style={{ color: '#EAECEF' }}>
-                <div>价格: <span style={{ color: '#F0B90B' }}>{decisionBTCInfo.price.toFixed(2)}</span></div>
-                <div>1h: <span style={{ color: decisionBTCInfo.change1h >= 0 ? '#0ECB81' : '#F6465D' }}>
-                  {decisionBTCInfo.change1h >= 0 ? '+' : ''}{decisionBTCInfo.change1h.toFixed(2)}%
-                </span></div>
-                <div>4h: <span style={{ color: decisionBTCInfo.change4h >= 0 ? '#0ECB81' : '#F6465D' }}>
-                  {decisionBTCInfo.change4h >= 0 ? '+' : ''}{decisionBTCInfo.change4h.toFixed(2)}%
-                </span></div>
-                <div>MACD: <span style={{ color: '#60a5fa' }}>{decisionBTCInfo.macd.toFixed(4)}</span></div>
-                <div>RSI: <span style={{ color: '#60a5fa' }}>{decisionBTCInfo.rsi.toFixed(2)}</span></div>
-              </div>
-            </div>
-            <div>
-              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
-                当前实时价格
-              </div>
-              {realtimeBTC ? (
-                <div className="font-mono" style={{ color: '#EAECEF' }}>
-                  <div>价格: <span style={{ color: '#0ECB81' }}>{realtimeBTC.price.toFixed(2)}</span></div>
-                  <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
-                    {decisionBTCInfo.price !== realtimeBTC.price && (
-                      <span style={{ 
-                        color: realtimeBTC.price > decisionBTCInfo.price ? '#0ECB81' : '#F6465D' 
-                      }}>
-                        {realtimeBTC.price > decisionBTCInfo.price ? '↑' : '↓'} 
-                        {Math.abs(realtimeBTC.price - decisionBTCInfo.price).toFixed(2)} 
-                        ({((realtimeBTC.price - decisionBTCInfo.price) / decisionBTCInfo.price * 100).toFixed(2)}%)
-                      </span>
+      {/* 价格对比 - 显示所有配置货币的决策时价格和当前实时价格 */}
+      {decisionSymbolInfos.length > 0 && (
+        <div className="mb-3 space-y-3">
+          {decisionSymbolInfos.map((symbolInfo) => {
+            const realtimePrice = realtimePrices.data?.[symbolInfo.symbol]
+            const symbolDisplay = symbolInfo.symbol.replace('USDT', '')
+            
+            return (
+              <div
+                key={symbolInfo.symbol}
+                className="p-3 rounded"
+                style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+              >
+                <div className="text-xs mb-2 font-semibold" style={{ color: '#848E9C' }}>
+                  {symbolDisplay}价格对比
+                </div>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
+                      决策时价格（历史快照）
+                    </div>
+                    <div className="font-mono" style={{ color: '#EAECEF' }}>
+                      <div>
+                        价格: <span style={{ color: '#F0B90B' }}>{symbolInfo.price.toFixed(2)}</span>
+                      </div>
+                      <div>
+                        1h:{' '}
+                        <span
+                          style={{
+                            color: symbolInfo.change1h >= 0 ? '#0ECB81' : '#F6465D',
+                          }}
+                        >
+                          {symbolInfo.change1h >= 0 ? '+' : ''}
+                          {symbolInfo.change1h.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div>
+                        4h:{' '}
+                        <span
+                          style={{
+                            color: symbolInfo.change4h >= 0 ? '#0ECB81' : '#F6465D',
+                          }}
+                        >
+                          {symbolInfo.change4h >= 0 ? '+' : ''}
+                          {symbolInfo.change4h.toFixed(2)}%
+                        </span>
+                      </div>
+                      <div>
+                        MACD: <span style={{ color: '#60a5fa' }}>{symbolInfo.macd.toFixed(4)}</span>
+                      </div>
+                      <div>
+                        RSI: <span style={{ color: '#60a5fa' }}>{symbolInfo.rsi.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs mb-1" style={{ color: '#848E9C' }}>
+                      当前实时价格
+                    </div>
+                    {realtimePrice ? (
+                      <div className="font-mono" style={{ color: '#EAECEF' }}>
+                        <div>
+                          价格:{' '}
+                          <span style={{ color: '#0ECB81' }}>{realtimePrice.price.toFixed(2)}</span>
+                        </div>
+                        <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
+                          {symbolInfo.price !== realtimePrice.price && (
+                            <span
+                              style={{
+                                color:
+                                  realtimePrice.price > symbolInfo.price ? '#0ECB81' : '#F6465D',
+                              }}
+                            >
+                              {realtimePrice.price > symbolInfo.price ? '↑' : '↓'}{' '}
+                              {Math.abs(realtimePrice.price - symbolInfo.price).toFixed(2)} (
+                              {(
+                                ((realtimePrice.price - symbolInfo.price) / symbolInfo.price) *
+                                100
+                              ).toFixed(2)}
+                              %)
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs mt-2" style={{ color: '#848E9C' }}>
+                          实时更新中...
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs" style={{ color: '#848E9C' }}>
+                        加载中...
+                      </div>
                     )}
                   </div>
-                  <div className="text-xs mt-2" style={{ color: '#848E9C' }}>
-                    实时更新中...
-                  </div>
                 </div>
-              ) : (
-                <div className="text-xs" style={{ color: '#848E9C' }}>
-                  加载中...
-                </div>
-              )}
-            </div>
-          </div>
+              </div>
+            )
+          })}
         </div>
       )}
 
